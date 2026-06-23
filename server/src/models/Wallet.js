@@ -117,6 +117,23 @@ class Wallet {
             client.release();
         }
     }
+
+    /**
+     * Gets the current balances for a user.
+     * @param {string} userId - The UUID of the user
+     */
+    static async getBalances(userId) {
+        const query = `
+            SELECT usd_balance, btc_balance 
+            FROM wallets 
+            WHERE user_id = $1; 
+        `;
+        const result = await pool.query(query, [userId]);
+        if (result.rows.length === 0) {
+            throw new Error('Wallet not found');
+        }
+        return result.rows[0];
+    }
 }
 
 module.exports = Wallet;

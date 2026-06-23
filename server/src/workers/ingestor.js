@@ -66,13 +66,19 @@ function initIngestionPipeline() {
     depthWs.on('error', () => depthWs.close());
 }
 
+let isReconnecting = false;
+
 function triggerBackoffLoop() {
+    if (isReconnecting) return;
+    isReconnecting = true;
+
     let backoff = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
     const finalDelay = backoff + Math.floor(Math.random() * 500);
 
     console.warn(`🔄 Attempting pipeline link reset in ${finalDelay}ms (Retry: ${reconnectAttempts + 1})`);
     setTimeout(() => {
         reconnectAttempts++;
+        isReconnecting = false;
         initIngestionPipeline();
     }, finalDelay);
 }

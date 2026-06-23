@@ -7,6 +7,7 @@ const helmet = require('helmet');
 const Redis = require('ioredis');
 const Ledger = require('./models/Ledger');
 const Wallet = require('./models/Wallet');
+const streamProcessor = require('./services/streamProcessor');
 
 // Initialize Express App
 const app = express();
@@ -64,11 +65,20 @@ redisSubscriber.on('message', (channel, message) => {
         
         if (channel === REDIS_TRADE_CHANNEL) {
             latestMarketPrices[payload.symbol] = payload.price; // Update our execution cache
+            streamProcessor.processTrade(payload.symbol, payload.price);
             // Broadcast the payload instantly to all connected React clients
             io.emit('live_price_update', payload);
+            
+            const metrics = streamProcessor.getMetrics(payload.symbol);
+            if (metrics) io.emit('live_metrics_update', metrics);
+
         } else if (channel === REDIS_DEPTH_CHANNEL) {
+            streamProcessor.processDepth(payload.symbol, payload.bids, payload.asks);
             // Push the 1-second order book snapshot to the UI
             io.emit('live_order_book', payload);
+            
+            const metrics = streamProcessor.getMetrics(payload.symbol);
+            if (metrics) io.emit('live_metrics_update', metrics);
         }
     } catch (error) {
         console.error('❌ Failed to parse Redis message:', error);
@@ -84,6 +94,18 @@ app.get('/api/history/:symbol', async (req, res) => {
         res.status(200).json(history);
     } catch (error) {
         res.status(500).json({ error: 'Internal Server Error fetching ledger history' });
+    }
+});
+
+// Wallet Balance Endpoint
+app.get('/api/wallet', async (req, res) => {
+    try {
+        const TEST_USER_ID = '00000000-0000-0000-0000-000000000001';
+        const balances = await Wallet.getBalances(TEST_USER_ID);
+        res.status(200).json(balances);
+    } catch (error) {
+        console.error('❌ Wallet fetch failed:', error.message);
+        res.status(500).json({ error: 'Failed to fetch wallet balances' });
     }
 });
 

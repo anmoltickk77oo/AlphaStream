@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { io } from "socket.io-client";
+import axios from "axios";
 
 function useLightweightCharts() {
   const [lwc, setLwc] = useState(null);
@@ -141,6 +143,16 @@ export default function AlphaStream() {
     }
   }, []);
 
+  const [socketStatus, setSocketStatus] = useState("disconnected");
+  const [isStale, setIsStale] = useState(false);
+  const [metrics, setMetrics] = useState({ spread: 0, volatility: 0, ema15: null, ema50: null });
+  const [showEMA, setShowEMA] = useState(false);
+  
+  const ema15SeriesRef = useRef(null);
+  const ema50SeriesRef = useRef(null);
+  const staleTimerRef = useRef(null);
+  const socketRef = useRef(null);
+
   const [theme, setTheme] = useState(() => localStorage.getItem('alphastream-theme') || 'dark');
   const [chartType, setChartType] = useState("Candles");
   const [showChartTypePicker, setShowChartTypePicker] = useState(false);
@@ -275,6 +287,12 @@ export default function AlphaStream() {
       volumeSeriesRef.current.setData(volumes);
     }
 
+    if (showEMA) {
+        ema15SeriesRef.current = chart.addLineSeries({ color: '#c2a1ff', lineWidth: 1.5 });
+        ema50SeriesRef.current = chart.addLineSeries({ color: '#ff6838', lineWidth: 1.5 });
+        extraSeriesRefs.current.push(ema15SeriesRef.current, ema50SeriesRef.current);
+    }
+
     const up = '#0ecb81';
     const down = '#f6465d';
     const lineColor = theme === 'light' ? '#1e2329' : '#eaecef';
@@ -338,83 +356,134 @@ export default function AlphaStream() {
     chart.timeScale().fitContent();
   }, [chartType, theme, selectedPair.name, timeframe, lwc]);
 
-  // Main Simulation Loop (1200ms)
+  // Backend Integration & WebSockets
   useEffect(() => {
-    const iv = setInterval(() => {
-      setPrice(prev => {
-        const drift = (Math.random() - 0.499) * (prev * 0.002);
-        const newPrice = +(prev + drift).toFixed(2);
-        setPriceDir(drift >= 0 ? 1 : -1);
+    axios.get("http://localhost:5000/api/wallet")
+      .then(res => {
+        if (res.data) {
+          setWallet(parseFloat(res.data.usd_balance) || 10000);
+          setBtcBal(parseFloat(res.data.btc_balance) || 0);
+        }
+      })
+      .catch(console.error);
 
-        setPairsList(list => list.map(p => {
-          if (p.name === selectedPair.name) {
-            const chg = ((newPrice - p.price) / p.price) * 100;
-            return { ...p, price: newPrice, change: isNaN(chg) ? 0 : chg };
-          }
-          return p;
-        }));
+    const socket = io("http://localhost:5000");
+    socketRef.current = socket;
 
-        setOrderBook(generateOrderBook(newPrice));
+    socket.on("connect", () => {
+      setSocketStatus("connected");
+      setIsStale(false);
+    });
 
-        setTrades(old => {
-          const isBuy = Math.random() > 0.5;
-          const newTrade = {
-            id: Math.random().toString(),
-            price: newPrice,
-            amount: +(Math.random() * 0.2).toFixed(5),
-            side: isBuy ? "buy" : "sell",
-            time: new Date().toTimeString().slice(0, 8),
-          };
-          return [newTrade, ...old].slice(0, 50);
+    socket.on("disconnect", () => setSocketStatus("disconnected"));
+
+    socket.on("live_price_update", (payload) => {
+      clearTimeout(staleTimerRef.current);
+      setIsStale(false);
+      staleTimerRef.current = setTimeout(() => setIsStale(true), 5000);
+
+      const isCurrentPair = payload.symbol.toLowerCase() === selectedPair.name.replace("/", "").toLowerCase();
+
+      setPairsList(list => list.map(p => {
+        if (p.name.replace("/", "").toLowerCase() === payload.symbol.toLowerCase()) {
+          const chg = ((payload.price - p.price) / p.price) * 100;
+          return { ...p, price: payload.price, change: isNaN(chg) ? 0 : chg };
+        }
+        return p;
+      }));
+
+      if (isCurrentPair) {
+        setPrice(prev => {
+          setPriceDir(payload.price >= prev ? 1 : -1);
+          return payload.price;
         });
 
-        if (mainSeriesRef.current && volumeSeriesRef.current) {
+        const newPrice = payload.price;
+        setTrades(old => {
+            const newTrade = {
+                id: Math.random().toString(),
+                price: newPrice,
+                amount: +(Math.random() * 0.2).toFixed(5),
+                side: Math.random() > 0.5 ? "buy" : "sell",
+                time: new Date().toTimeString().slice(0, 8),
+            };
+            return [newTrade, ...old].slice(0, 50);
+        });
+
+        if (mainSeriesRef.current && volumeSeriesRef.current && chartDataRef.current.candles.length > 0) {
           const { candles, volumes } = chartDataRef.current;
-          if (candles.length > 0) {
-            const lastCandle = candles[candles.length - 1];
-            lastCandle.close = newPrice;
-            if (newPrice > lastCandle.high) lastCandle.high = newPrice;
-            if (newPrice < lastCandle.low) lastCandle.low = newPrice;
-            
-            const lastVol = volumes[volumes.length - 1];
-            lastVol.color = lastCandle.close >= lastCandle.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)";
-            lastVol.value += +(Math.random() * 5).toFixed(2);
+          const lastCandle = candles[candles.length - 1];
+          lastCandle.close = newPrice;
+          if (newPrice > lastCandle.high) lastCandle.high = newPrice;
+          if (newPrice < lastCandle.low) lastCandle.low = newPrice;
+          
+          const lastVol = volumes[volumes.length - 1];
+          lastVol.color = lastCandle.close >= lastCandle.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)";
+          lastVol.value += +(Math.random() * 2).toFixed(2);
 
-            const updateObj = { time: lastCandle.time, open: lastCandle.open, high: lastCandle.high, low: lastCandle.low, close: lastCandle.close };
-            const lineObj = { time: lastCandle.time, value: lastCandle.close };
-            
-            if (chartType === "Bars" || chartType.toLowerCase().includes("candles")) {
-              mainSeriesRef.current.update(updateObj);
-            } else if (chartType === "HLC area") {
-              mainSeriesRef.current.update(lineObj);
-              if (extraSeriesRefs.current.length === 2) {
-                extraSeriesRefs.current[0].update({ time: lastCandle.time, value: lastCandle.high });
-                extraSeriesRefs.current[1].update({ time: lastCandle.time, value: lastCandle.low });
-              }
-            } else {
-              mainSeriesRef.current.update(lineObj);
-              if (chartType === "Line with markers") {
-                const markers = candles.map(c => ({
-                  time: c.time, position: c.close >= c.open ? 'belowBar' : 'aboveBar', color: c.close >= c.open ? '#0ecb81' : '#f6465d', shape: c.close >= c.open ? 'arrowUp' : 'arrowDown',
-                }));
-                mainSeriesRef.current.setMarkers(markers);
-              }
+          const timeStr = Math.floor(Date.now() / 1000);
+          lastCandle.time = timeStr;
+          lastVol.time = timeStr;
+
+          const updateObj = { time: lastCandle.time, open: lastCandle.open, high: lastCandle.high, low: lastCandle.low, close: lastCandle.close };
+          const lineObj = { time: lastCandle.time, value: lastCandle.close };
+          
+          if (chartType === "Bars" || chartType.toLowerCase().includes("candles")) {
+            mainSeriesRef.current.update(updateObj);
+          } else if (chartType === "HLC area") {
+            mainSeriesRef.current.update(lineObj);
+            if (extraSeriesRefs.current.length >= 2) {
+              extraSeriesRefs.current[0].update({ time: lastCandle.time, value: lastCandle.high });
+              extraSeriesRefs.current[1].update({ time: lastCandle.time, value: lastCandle.low });
             }
-            volumeSeriesRef.current.update(lastVol);
+          } else {
+            mainSeriesRef.current.update(lineObj);
           }
+          volumeSeriesRef.current.update(lastVol);
         }
+      }
+    });
 
-        return newPrice;
-      });
-    }, 1200);
-    return () => clearInterval(iv);
-  }, [selectedPair.name, chartType]);
+    socket.on("live_order_book", (payload) => {
+      if (payload.symbol.toLowerCase() === selectedPair.name.replace("/", "").toLowerCase()) {
+        let askTotal = 0;
+        const asks = payload.asks.slice(0, 16).map(a => {
+            askTotal += a.quantity;
+            return { price: a.price, amount: a.quantity, total: askTotal };
+        }).reverse();
+
+        let bidTotal = 0;
+        const bids = payload.bids.slice(0, 16).map(b => {
+            bidTotal += b.quantity;
+            return { price: b.price, amount: b.quantity, total: bidTotal };
+        });
+
+        setOrderBook({ asks, bids });
+      }
+    });
+
+    socket.on("live_metrics_update", (payload) => {
+      if (payload.symbol.toLowerCase() === selectedPair.name.replace("/", "").toLowerCase()) {
+        setMetrics(payload);
+        const timeStr = Math.floor(Date.now() / 1000);
+        if (showEMA) {
+            if (ema15SeriesRef.current && payload.ema15) ema15SeriesRef.current.update({ time: timeStr, value: payload.ema15 });
+            if (ema50SeriesRef.current && payload.ema50) ema50SeriesRef.current.update({ time: timeStr, value: payload.ema50 });
+        }
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+      clearTimeout(staleTimerRef.current);
+    };
+  }, [selectedPair.name, chartType, showEMA]);
 
   const filteredPairs = useMemo(() => 
     pairsList.filter((p) => p.name.toLowerCase().includes(pairSearch.toLowerCase())),
   [pairsList, pairSearch]);
 
-  const handleBuy = useCallback(() => {
+  const handleBuy = useCallback(async () => {
     setBuyError(""); setBuyFlash("");
     const p = parseFloat(buyPrice);
     const a = parseFloat(buyAmt);
@@ -425,13 +494,28 @@ export default function AlphaStream() {
     if (cost > wallet) {
       setBuyError("Insufficient USDT"); return;
     }
-    setWallet(w => +(w - cost).toFixed(2));
-    setBtcBal(b => +(b + a).toFixed(5));
-    setBuyFlash(`✓ Filled at $${p}`);
-    setTimeout(() => setBuyFlash(""), 2000);
-  }, [buyAmt, buyPrice, wallet]);
+    try {
+        const res = await axios.post("http://localhost:5000/api/trade", {
+            symbol: selectedPair.name.replace("/", ""),
+            side: "BUY",
+            amountUSD: cost
+        });
+        if (res.data.status === 'SUCCESS' && res.data.newBalances) {
+            setWallet(parseFloat(res.data.newBalances.usd_balance));
+            setBtcBal(parseFloat(res.data.newBalances.btc_balance));
+        } else {
+            // Simulated trade update fallback
+            setWallet(w => +(w - cost).toFixed(2));
+            setBtcBal(b => +(b + a).toFixed(5));
+        }
+        setBuyFlash(`✓ Filled at ${p}`);
+        setTimeout(() => setBuyFlash(""), 2000);
+    } catch (err) {
+        setBuyError(err.response?.data?.error || "Trade failed");
+    }
+  }, [buyAmt, buyPrice, wallet, selectedPair.name]);
 
-  const handleSell = useCallback(() => {
+  const handleSell = useCallback(async () => {
     setSellError(""); setSellFlash("");
     const p = parseFloat(buyPrice);
     const a = parseFloat(buyAmt);
@@ -441,12 +525,27 @@ export default function AlphaStream() {
     if (a > btcBal) {
       setSellError("Insufficient BTC"); return;
     }
-    const revenue = p * a;
-    setBtcBal(b => +(b - a).toFixed(5));
-    setWallet(w => +(w + revenue).toFixed(2));
-    setSellFlash(`✓ Sold at $${p}`);
-    setTimeout(() => setSellFlash(""), 2000);
-  }, [buyAmt, buyPrice, btcBal]);
+    const cost = p * a;
+    try {
+        const res = await axios.post("http://localhost:5000/api/trade", {
+            symbol: selectedPair.name.replace("/", ""),
+            side: "SELL",
+            amountUSD: cost
+        });
+        if (res.data.status === 'SUCCESS' && res.data.newBalances) {
+            setWallet(parseFloat(res.data.newBalances.usd_balance));
+            setBtcBal(parseFloat(res.data.newBalances.btc_balance));
+        } else {
+            // Simulated trade update fallback
+            setBtcBal(b => +(b - a).toFixed(5));
+            setWallet(w => +(w + cost).toFixed(2));
+        }
+        setSellFlash(`✓ Sold at ${p}`);
+        setTimeout(() => setSellFlash(""), 2000);
+    } catch (err) {
+        setSellError(err.response?.data?.error || "Trade failed");
+    }
+  }, [buyAmt, buyPrice, btcBal, selectedPair.name]);
 
   const applyPercent = useCallback((pct, type) => {
     const p = parseFloat(buyPrice) || price;
@@ -504,6 +603,13 @@ export default function AlphaStream() {
       `}</style>
 
       <div style={{ display: "flex", flexDirection: "column", width: "100vw", height: "100vh", overflow: "hidden", background: "var(--bg-primary)", color: "var(--text-primary)", boxSizing: "border-box" }}>
+        
+        {isStale && (
+          <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", background: "rgba(246,70,93,0.9)", color: "#fff", padding: "16px 24px", borderRadius: "8px", zIndex: 1000, fontWeight: 700, fontSize: "16px", boxShadow: "0 4px 12px rgba(0,0,0,0.5)", display: "flex", alignItems: "center", gap: "10px" }}>
+            <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01"/></svg>
+            STALE DATA WARNING
+          </div>
+        )}
         
         {/* ROW 1: Ticker Bar */}
         <div style={{ height: "48px", flexShrink: 0, display: "flex", alignItems: "center", gap: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-primary)", overflowX: "auto", overflowY: "hidden" }}>
@@ -623,9 +729,13 @@ export default function AlphaStream() {
 
             {/* ROW B3: MA Indicators */}
             <div style={{ height: "26px", flexShrink: 0, display: "flex", alignItems: "center", gap: "16px", padding: "0 16px" }}>
-              <span className="mono" style={{ fontSize: "13px", fontWeight: 600, color: "#f0b90b" }}>MA(7)</span>
-              <span className="mono" style={{ fontSize: "13px", fontWeight: 600, color: "#c2a1ff" }}>MA(25)</span>
-              <span className="mono" style={{ fontSize: "13px", fontWeight: 600, color: "#ff6838" }}>MA(99)</span>
+              <div onClick={() => setShowEMA(!showEMA)} style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", background: showEMA ? "var(--bg-secondary)" : "transparent", padding: "2px 8px", borderRadius: "4px", border: showEMA ? "1px solid var(--accent)" : "1px solid var(--border)" }}>
+                <span className="mono" style={{ fontSize: "12px", fontWeight: 600, color: showEMA ? "var(--accent)" : "var(--text-secondary)" }}>EMA 15/50</span>
+              </div>
+              <div style={{ display: "flex", gap: "16px", marginLeft: "auto" }}>
+                <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>Spread: <span style={{ color: "var(--text-primary)" }}>{metrics.spread ? metrics.spread.toFixed(2) : '-'}</span></span>
+                <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>Vol: <span style={{ color: "var(--text-primary)" }}>{metrics.volatility ? metrics.volatility.toFixed(4) : '-'}</span></span>
+              </div>
             </div>
 
             {/* ROW B4: Chart Container */}
@@ -751,7 +861,10 @@ export default function AlphaStream() {
 
         {/* ROW 3: Status Bar */}
         <div style={{ height: "28px", flexShrink: 0, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 12px", gap: "24px", background: "var(--bg-secondary)", fontSize: "12px", fontWeight: 500, overflow: "hidden" }}>
-          <span style={{ color: "#0ecb81", flexShrink: 0 }}>● LIVE WEBSOCKET CONNECTED</span>
+          <span style={{ color: socketStatus === 'connected' ? "#0ecb81" : "#f6465d", flexShrink: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: socketStatus === 'connected' ? "#0ecb81" : "#f6465d" }}></span>
+            {socketStatus === 'connected' ? "LIVE WEBSOCKET CONNECTED" : "WEBSOCKET DISCONNECTED"}
+          </span>
           {pairsList.slice(0, 10).map((p) => (
             <div key={p.name} style={{ display: "flex", gap: "6px", flexShrink: 0, color: "var(--text-secondary)" }}>
               <span>{p.name}</span>
