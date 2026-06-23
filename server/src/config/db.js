@@ -21,10 +21,8 @@ const pool = new Pool({
 });
 
 pool.on('error', (err, client) => {
-    console.error('Unexpected error on idle client', err);
-    process.exit(-1);
+    console.error('⚠️ PostgreSQL connection error (is Docker running?):', err.message);
+    // process.exit(-1); // Disabled to allow server to run without DB for now
 });
 
-module.exports = {
-    query: (text, params) => pool.query(text, params),
-};
+module.exports = pool;

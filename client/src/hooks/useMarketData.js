@@ -1,75 +1,59 @@
 import { useState, useEffect, useRef } from 'react';
-import { fetchPriceHistory } from '../services/api';
 import { socket } from '../services/socketClient';
+// Vite syntax for importing a WebWorker
+import MathWorker from '../workers/mathWorker?worker';
 
 export const useMarketData = (symbol) => {
     const [chartData, setChartData] = useState([]);
+    const [emaData, setEmaData] = useState([]);
+    const [volatility, setVolatility] = useState(0);
     const [currentPrice, setCurrentPrice] = useState(null);
-    const [priceDirection, setPriceDirection] = useState('neutral'); // 'up' | 'down' | 'neutral'
+    const [orderBookData, setOrderBookData] = useState(null);
 
-    // Use a ref to keep track of the absolute latest price for comparison
-    const lastPriceRef = useRef(null);
+    const workerRef = useRef(null);
 
     useEffect(() => {
-        let isMounted = true;
+        // 1. Initialize the WebWorker
+        workerRef.current = new MathWorker();
 
-        // 1. Fetch initial historical ledger data from PostgreSQL
-        const loadInitialData = async () => {
-            try {
-                const history = await fetchPriceHistory(symbol);
-                if (isMounted) {
-                    // Map the DB schema to values Recharts easily digests
-                    const formattedHistory = history.map(item => ({
-                        time: new Date(item.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-                        price: parseFloat(item.price)
-                    }));
-                    setChartData(formattedHistory);
-
-                    if (formattedHistory.length > 0) {
-                        const lastItemPrice = formattedHistory[formattedHistory.length - 1].price;
-                        setCurrentPrice(lastItemPrice);
-                        lastPriceRef.current = lastItemPrice;
-                    }
-                }
-            } catch (error) {
-                console.error("Failed to load chart history base:", error);
-            }
+        // 2. Listen for the calculated results from the background thread
+        workerRef.current.onmessage = (e) => {
+            setEmaData(e.data.ema);
+            setVolatility(e.data.volatility);
         };
 
-        loadInitialData();
-
-        // 2. Listen to the real-time engine bridge
+        // 3. Listen to the Redis/Socket.IO Pipeline
         socket.on('live_price_update', (data) => {
-            if (!isMounted || data.symbol !== symbol) return;
+            if (data.symbol !== symbol) return;
 
             const newPrice = parseFloat(data.price);
-            const formattedTime = new Date(data.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-            // Determine directional color formatting (Green vs Red)
-            if (lastPriceRef.current !== null) {
-                if (newPrice > lastPriceRef.current) setPriceDirection('up');
-                else if (newPrice < lastPriceRef.current) setPriceDirection('down');
-            }
-
             setCurrentPrice(newPrice);
-            lastPriceRef.current = newPrice;
 
-            // Update chart data stream array, bounding it to maximum 50 elements to keep UI snappy
             setChartData((prevData) => {
-                const updated = [...prevData, { time: formattedTime, price: newPrice }];
-                if (updated.length > 50) {
-                    updated.shift(); // Evict the oldest data point
-                }
+                const updated = [...prevData, { time: data.timestamp, price: newPrice }];
+                // Keep the last 100 points for a smooth visual window
+                if (updated.length > 100) updated.shift();
+
+                // Fire the array to the WebWorker for heavy math processing
+                const priceArray = updated.map(d => d.price);
+                workerRef.current.postMessage({ prices: priceArray });
+
                 return updated;
             });
         });
 
-        // Cleanup connections and listeners on component unmount
+        // 4. Listen to the Order Book Stream
+        socket.on('live_order_book', (data) => {
+            if (data.symbol !== symbol) return;
+            setOrderBookData({ bids: data.bids, asks: data.asks });
+        });
+
         return () => {
-            isMounted = false;
             socket.off('live_price_update');
+            socket.off('live_order_book');
+            workerRef.current.terminate(); // Clean up worker on unmount
         };
     }, [symbol]);
 
-    return { chartData, currentPrice, priceDirection };
+    return { chartData, emaData, volatility, currentPrice, orderBookData };
 };

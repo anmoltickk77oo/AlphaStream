@@ -1,65 +1,90 @@
 const WebSocket = require('ws');
-const Ledger = require('../models/Ledger');
+const Redis = require('ioredis');
 
 // Binance raw WebSocket endpoint for BTC/USDT trades
 const BINANCE_WS_URL = process.env.BINANCE_WS_URL || 'wss://stream.binance.com:9443/ws/btcusdt@trade';
 
-// Throttle configuration: 30 seconds (30,000 ms)
-const DB_WRITE_THROTTLE_MS = 30000;
-let lastDbWriteTime = 0;
+// Initialize Redis Publisher
+const redisPublisher = new Redis({
+    host: process.env.REDIS_HOST || '127.0.0.1',
+    port: process.env.REDIS_PORT || 6379
+});
+
+// Exponential Backoff Configuration
+const MAX_RECONNECT_DELAY = 30000; // 30 seconds
+let currentReconnectDelay = 1000;  // Starts at 1 second
+
+// Throttling configuration for Redis (publish max 5 times per second)
+const REDIS_PUBLISH_INTERVAL_MS = 200; // 5 updates/sec
+let lastPublishTime = 0;
 
 /**
- * Initializes the WebSocket connection to the exchange.
- * @param {Object} io - The initialized Socket.IO server instance
+ * Initializes the WebSocket connection to the exchange (The Ingestion Worker).
  */
-function startMarketStream(io) {
+function startMarketStream() {
+    console.log(`[Circuit Breaker] Connecting to Binance...`);
     const ws = new WebSocket(BINANCE_WS_URL);
 
     ws.on('open', () => {
         console.log('🔗 Connected to Binance Market Stream');
+        // Reset the circuit breaker delay on a successful connection
+        currentReconnectDelay = 1000;
     });
 
-    ws.on('message', async (data) => {
+    ws.on('message', (data) => {
         try {
             const trade = JSON.parse(data);
 
-            // Binance payload mapping: 's' = symbol, 'p' = price, 'E' = event time
             const symbol = trade.s;
             const price = parseFloat(trade.p);
 
-            // Clean payload for our frontend
             const payload = {
                 symbol,
                 price,
                 timestamp: trade.E
             };
 
-            // 1. THE FAST PATH: Broadcast immediately to React clients via Socket.IO
-            io.emit('live_price_update', payload);
-
-            // 2. THE SLOW PATH: Throttled database insertion for historical ledger
             const now = Date.now();
-            if (now - lastDbWriteTime >= DB_WRITE_THROTTLE_MS) {
-                lastDbWriteTime = now;
-                await Ledger.insertPrice(symbol, price);
-                console.log(`💾 Ledger Snapshot Saved: ${symbol} @ $${price}`);
-            }
 
+            // Throttle Redis publishing to avoid blowing up the network
+            if (now - lastPublishTime >= REDIS_PUBLISH_INTERVAL_MS) {
+                lastPublishTime = now;
+                // PUBLISH to the MARKET_DATA channel
+                redisPublisher.publish('MARKET_DATA', JSON.stringify(payload));
+            }
         } catch (error) {
             console.error('❌ Error processing stream data:', error);
         }
     });
 
-    // Production reliability: Auto-reconnect on disconnect
     ws.on('close', () => {
-        console.warn('⚠️ Market stream disconnected. Attempting reconnect in 5 seconds...');
-        setTimeout(() => startMarketStream(io), 5000);
+        console.warn(`⚠️ Market stream disconnected.`);
+        triggerCircuitBreakerReconnect();
     });
 
     ws.on('error', (err) => {
         console.error('❌ Market stream error:', err.message);
-        ws.close(); // Force close to trigger the auto-reconnect logic
+        // Do not call reconnect here, as 'close' will fire immediately after 'error'
     });
+}
+
+/**
+ * Implements Exponential Backoff logic for reconnecting.
+ */
+function triggerCircuitBreakerReconnect() {
+    if (currentReconnectDelay > MAX_RECONNECT_DELAY) {
+        console.error('🚨 [SYSTEM OUTAGE ALERT] Binance WebSocket is unreachable after multiple attempts!');
+        // In a real production app, this would trigger PagerDuty or Slack alerts
+        return;
+    }
+
+    console.log(`⏱️ [Circuit Breaker] Attempting reconnect in ${currentReconnectDelay / 1000} seconds...`);
+    setTimeout(() => {
+        startMarketStream();
+    }, currentReconnectDelay);
+
+    // Exponentially increase the delay for the next potential failure (1s -> 2s -> 4s -> 8s ...)
+    currentReconnectDelay *= 2;
 }
 
 module.exports = startMarketStream;
