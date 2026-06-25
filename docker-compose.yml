@@ -19,5 +19,44 @@ services:
       - "6379:6379"
     restart: always
 
+  server:
+    build: ./server
+    container_name: alphastream_server
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - DB_USER=admin
+      - DB_PASSWORD=supersecretpassword
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=alphastream
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - postgres
+      - redis
+    restart: always
+
+  worker:
+    build: ./server
+    container_name: alphastream_worker
+    command: node src/workers/ingestor.js
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    restart: always
+
+  client:
+    build: ./client
+    container_name: alphastream_client
+    ports:
+      - "3000:80"
+    depends_on:
+      - server
+    restart: always
+
 volumes:
   pgdata:

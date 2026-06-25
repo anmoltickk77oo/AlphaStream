@@ -7,7 +7,12 @@ const BINANCE_WS_URL = process.env.BINANCE_WS_URL || 'wss://stream.binance.com:9
 // Initialize Redis Publisher
 const redisPublisher = new Redis({
     host: process.env.REDIS_HOST || '127.0.0.1',
-    port: process.env.REDIS_PORT || 6379
+    port: process.env.REDIS_PORT || 6379,
+    maxRetriesPerRequest: null
+});
+
+redisPublisher.on('error', (err) => {
+    console.error('❌ Redis connection error:', err.message);
 });
 
 // Exponential Backoff Configuration

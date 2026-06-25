@@ -31,22 +31,38 @@ Ledger.initializeSchema();
 Wallet.initializeSchema();
 
 // ---------------------------------------------------------
-// REDIS SUBSCRIBER PIPELINE (Horizontal Scaling Layer)
+// REDIS CLIENT & SUBSCRIBER PIPELINE (Horizontal Scaling Layer)
 // ---------------------------------------------------------
 const redisSubscriber = new Redis({
     host: process.env.REDIS_HOST || '127.0.0.1',
-    port: parseInt(process.env.REDIS_PORT || '6379', 10)
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    maxRetriesPerRequest: null
+});
+
+const redisClient = new Redis({
+    host: process.env.REDIS_HOST || '127.0.0.1',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    maxRetriesPerRequest: null
+});
+
+redisSubscriber.on('error', (err) => {
+    console.error('❌ Redis subscriber connection error:', err.message);
+});
+
+redisClient.on('error', (err) => {
+    console.error('❌ Redis client connection error:', err.message);
 });
 
 const REDIS_TRADE_CHANNEL = 'MARKET_DATA';
 const REDIS_DEPTH_CHANNEL = 'ORDER_BOOK';
+const REDIS_STATUS_CHANNEL = 'SYSTEM_STATUS';
 
 // Note: Using 'ready' instead of 'connect' to avoid the ioredis Subscriber Mode crash!
 redisSubscriber.on('ready', () => {
     console.log('🧠 Express Server connected to Redis Subscriber (Ready)');
 
-    // Subscribe to BOTH channels
-    redisSubscriber.subscribe(REDIS_TRADE_CHANNEL, REDIS_DEPTH_CHANNEL, (err, count) => {
+    // Subscribe to ALL channels
+    redisSubscriber.subscribe(REDIS_TRADE_CHANNEL, REDIS_DEPTH_CHANNEL, REDIS_STATUS_CHANNEL, (err, count) => {
         if (err) {
             console.error('❌ Failed to subscribe to Redis channels:', err);
         } else {
@@ -79,6 +95,9 @@ redisSubscriber.on('message', (channel, message) => {
             
             const metrics = streamProcessor.getMetrics(payload.symbol);
             if (metrics) io.emit('live_metrics_update', metrics);
+        } else if (channel === REDIS_STATUS_CHANNEL) {
+            console.warn(`⚠️ System status update: ${payload.status}`);
+            io.emit('system_status', payload);
         }
     } catch (error) {
         console.error('❌ Failed to parse Redis message:', error);
@@ -154,30 +173,37 @@ app.post('/api/trade', async (req, res) => {
 });
 
 // --- Historical PostgreSQL Logging ---
-// Run an independent loop to insert the price history every 60 seconds
-let lastKnownPrice = null;
-redisSubscriber.on('message', (channel, message) => {
-    if (channel === REDIS_TRADE_CHANNEL) {
-        lastKnownPrice = JSON.parse(message);
-    }
-});
-
+// Run an independent loop to insert the price history for all tracked symbols every 60 seconds
 setInterval(async () => {
-    if (lastKnownPrice) {
-        try {
-            await Ledger.insertPrice(lastKnownPrice.symbol, lastKnownPrice.price);
-            console.log(`💾 [60s Snapshot] Saved ${lastKnownPrice.symbol} @ $${lastKnownPrice.price}`);
-        } catch (error) {
-            console.error('❌ Failed to save periodic ledger snapshot:', error);
-        }
+    const symbols = Object.keys(latestMarketPrices);
+    if (symbols.length === 0) return;
+
+    console.log(`💾 [60s Snapshot] Recording price snapshots for ${symbols.length} symbol(s)...`);
+    try {
+        await Promise.all(
+            symbols.map(symbol => 
+                Ledger.insertPrice(symbol, latestMarketPrices[symbol])
+                    .catch(err => console.error(`❌ Failed to save snapshot for ${symbol}:`, err.message))
+            )
+        );
+    } catch (error) {
+        console.error('❌ Failed to save periodic ledger snapshots:', error);
     }
 }, 60000);
 
 // Socket.IO Connection Handler
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
     console.log(`🔌 Client connected: ${socket.id}`);
 
-    // If we had the circuit breaker state in Redis, we could emit it here
+    // Fetch the current system outage status from Redis on connection
+    try {
+        const isOutage = await redisClient.get('SYSTEM_OUTAGE');
+        socket.emit('system_status', { status: isOutage === 'true' ? 'OUTAGE' : 'HEALTHY' });
+    } catch (err) {
+        console.error('❌ Failed to fetch system outage status from Redis:', err.message);
+        socket.emit('system_status', { status: 'HEALTHY' });
+    }
+
     socket.emit('connection_status', { status: 'Connected' });
 
     socket.on('disconnect', () => {

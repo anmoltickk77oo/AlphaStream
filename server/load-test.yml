@@ -1,0 +1,28 @@
+config:
+  target: "http://localhost:5000"
+  phases:
+    - duration: 20
+      arrivalRate: 50
+      name: "Simulating 1,000 concurrent traders (50 new users/sec for 20s)"
+
+scenarios:
+  - name: "API Trade Spam under concurrent load"
+    flow:
+      # 1. Fetch current balance
+      - get:
+          url: "/api/wallet"
+      # 2. Execute a simulated buy trade
+      - post:
+          url: "/api/trade"
+          json:
+            symbol: "BTCUSDT"
+            side: "BUY"
+            amountUSD: 5.00
+      - think: 0.2
+      # 3. Execute a simulated sell trade to clear position
+      - post:
+          url: "/api/trade"
+          json:
+            symbol: "BTCUSDT"
+            side: "SELL"
+            amountUSD: 5.00

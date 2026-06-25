@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { io } from "socket.io-client";
 import axios from "axios";
+import MathWorker from './workers/mathWorker?worker';
+import { SvgChart } from './components/SvgChart';
 
 function useLightweightCharts() {
   const [lwc, setLwc] = useState(null);
@@ -11,6 +13,7 @@ function useLightweightCharts() {
     }
     const script = document.createElement("script");
     script.src = "https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js";
+    script.crossOrigin = "anonymous";
     script.async = true;
     script.onload = () => setLwc(window.LightweightCharts);
     document.head.appendChild(script);
@@ -37,7 +40,8 @@ function generateCandles(basePrice, timeframeMs = 3600000, count = 168) {
   let currentPrice = basePrice * 0.95;
   const now = Math.floor(Date.now() / 1000);
   const tfSec = Math.floor(timeframeMs / 1000);
-  let time = now - (count * tfSec);
+  const alignedNow = Math.floor(now / tfSec) * tfSec;
+  let time = alignedNow - ((count - 1) * tfSec);
 
   for (let i = 0; i < count; i++) {
     const open = currentPrice;
@@ -64,6 +68,28 @@ function generateCandles(basePrice, timeframeMs = 3600000, count = 168) {
   volumes[volumes.length - 1].color = last.close >= last.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)";
 
   return { candles, volumes };
+}
+
+function calculateHistoricalEMA(candles, period) {
+  if (candles.length < period) return [];
+  const emaData = [];
+  
+  // Calculate seed SMA
+  const seedSlice = candles.slice(0, period);
+  const sma = seedSlice.reduce((sum, c) => sum + c.close, 0) / period;
+  emaData.push({ time: candles[period - 1].time, value: sma });
+  
+  const multiplier = 2 / (period + 1);
+  let prevEMA = sma;
+  
+  for (let i = period; i < candles.length; i++) {
+    const currentPrice = candles[i].close;
+    const emaValue = (currentPrice - prevEMA) * multiplier + prevEMA;
+    emaData.push({ time: candles[i].time, value: emaValue });
+    prevEMA = emaValue;
+  }
+  
+  return emaData;
 }
 
 function generateOrderBook(mid) {
@@ -129,6 +155,74 @@ const CHART_GROUPS = [
   { label: "Area variants", items: ["Area", "HLC area", "Baseline"] }
 ];
 
+function aggregateOrderBook(bids, asks, currentPrice) {
+  if (!currentPrice || currentPrice <= 0 || !bids || !asks) return { bids: [], asks: [] };
+
+  const bucketSizePercent = 0.001; // 0.1% of current price
+  
+  // Initialize 10 ask buckets (ascending from current price)
+  const askBuckets = Array.from({ length: 10 }, (_, i) => {
+    const lowerBound = currentPrice * (1 + i * bucketSizePercent);
+    const upperBound = currentPrice * (1 + (i + 1) * bucketSizePercent);
+    return {
+      price: (lowerBound + upperBound) / 2, // midpoint
+      amount: 0,
+      total: 0
+    };
+  });
+
+  // Initialize 10 bid buckets (descending from current price)
+  const bidBuckets = Array.from({ length: 10 }, (_, i) => {
+    const upperBound = currentPrice * (1 - i * bucketSizePercent);
+    const lowerBound = currentPrice * (1 - (i + 1) * bucketSizePercent);
+    return {
+      price: (lowerBound + upperBound) / 2, // midpoint
+      amount: 0,
+      total: 0
+    };
+  });
+
+  // Populate asks
+  for (const ask of asks) {
+    const diff = (ask.price - currentPrice) / currentPrice;
+    if (diff >= 0) {
+      const bucketIndex = Math.floor(diff / bucketSizePercent);
+      if (bucketIndex >= 0 && bucketIndex < 10) {
+        askBuckets[bucketIndex].amount += ask.amount || ask.quantity || 0;
+      }
+    }
+  }
+
+  // Populate bids
+  for (const bid of bids) {
+    const diff = (currentPrice - bid.price) / currentPrice;
+    if (diff >= 0) {
+      const bucketIndex = Math.floor(diff / bucketSizePercent);
+      if (bucketIndex >= 0 && bucketIndex < 10) {
+        bidBuckets[bucketIndex].amount += bid.amount || bid.quantity || 0;
+      }
+    }
+  }
+
+  // Calculate cumulative totals for depth overlay visualization
+  let askTotal = 0;
+  const cleanAsks = askBuckets.map(b => {
+    askTotal += b.amount;
+    return { ...b, total: askTotal };
+  });
+
+  let bidTotal = 0;
+  const cleanBids = bidBuckets.map(b => {
+    bidTotal += b.amount;
+    return { ...b, total: bidTotal };
+  });
+
+  return {
+    asks: cleanAsks.reverse(), // reverse asks so highest price displays on top in UI
+    bids: cleanBids
+  };
+}
+
 export default function AlphaStream() {
   const lwc = useLightweightCharts();
   
@@ -152,6 +246,14 @@ export default function AlphaStream() {
   const ema50SeriesRef = useRef(null);
   const staleTimerRef = useRef(null);
   const socketRef = useRef(null);
+
+  const [chartViewMode, setChartViewMode] = useState("LWC"); // "LWC" or "SVG"
+  const [livePriceBuffer, setLivePriceBuffer] = useState([]);
+  const [workerMetrics, setWorkerMetrics] = useState({ volatility: 0, ema10: null, emaArray: [] });
+
+  const workerRef = useRef(null);
+  const rawOrderBookRef = useRef({ bids: [], asks: [] });
+  const orderBookPendingRef = useRef(false);
 
   const [theme, setTheme] = useState(() => localStorage.getItem('alphastream-theme') || 'dark');
   const [chartType, setChartType] = useState("Candles");
@@ -183,6 +285,16 @@ export default function AlphaStream() {
   const volumeSeriesRef = useRef(null);
   const chartDataRef = useRef({ candles: [], volumes: [] });
   const typePickerRef = useRef(null);
+
+  const selectedPairRef = useRef(selectedPair);
+  const chartTypeRef = useRef(chartType);
+  const showEMARef = useRef(showEMA);
+  const timeframeRef = useRef(timeframe);
+
+  useEffect(() => { selectedPairRef.current = selectedPair; }, [selectedPair]);
+  useEffect(() => { chartTypeRef.current = chartType; }, [chartType]);
+  useEffect(() => { showEMARef.current = showEMA; }, [showEMA]);
+  useEffect(() => { timeframeRef.current = timeframe; }, [timeframe]);
 
   useEffect(() => {
     document.body.setAttribute('data-theme', theme);
@@ -261,6 +373,13 @@ export default function AlphaStream() {
     setBuyPrice(selectedPair.price.toFixed(2));
     setOrderBook(generateOrderBook(selectedPair.price));
     setTrades(generateInitialTrades(selectedPair.price));
+
+    // Seed price buffer for WebWorker calculations
+    const initialPrices = candles.map(c => c.close);
+    setLivePriceBuffer(initialPrices);
+    if (workerRef.current) {
+        workerRef.current.postMessage({ prices: initialPrices });
+    }
   }, [selectedPair.name, timeframe]);
 
   // Handle Chart Type & Apply Data
@@ -290,6 +409,10 @@ export default function AlphaStream() {
     if (showEMA) {
         ema15SeriesRef.current = chart.addLineSeries({ color: '#c2a1ff', lineWidth: 1.5 });
         ema50SeriesRef.current = chart.addLineSeries({ color: '#ff6838', lineWidth: 1.5 });
+        const ema15Data = calculateHistoricalEMA(candles, 15);
+        const ema50Data = calculateHistoricalEMA(candles, 50);
+        ema15SeriesRef.current.setData(ema15Data);
+        ema50SeriesRef.current.setData(ema50Data);
         extraSeriesRefs.current.push(ema15SeriesRef.current, ema50SeriesRef.current);
     }
 
@@ -358,6 +481,32 @@ export default function AlphaStream() {
 
   // Backend Integration & WebSockets
   useEffect(() => {
+    // 1. Initialize WebWorker
+    workerRef.current = new MathWorker();
+    workerRef.current.onmessage = (e) => {
+        const { ema, volatility } = e.data;
+        const latestEMA = ema && ema.length > 0 ? ema[ema.length - 1] : null;
+        setWorkerMetrics({
+            volatility: volatility || 0,
+            ema10: latestEMA,
+            emaArray: ema || []
+        });
+    };
+
+    // 2. Order book update interval (2 times per second)
+    const orderBookInterval = setInterval(() => {
+        if (orderBookPendingRef.current) {
+            orderBookPendingRef.current = false;
+            const currentP = selectedPairRef.current.price;
+            const aggregated = aggregateOrderBook(
+                rawOrderBookRef.current.bids,
+                rawOrderBookRef.current.asks,
+                currentP
+            );
+            setOrderBook(aggregated);
+        }
+    }, 500);
+
     axios.get("http://localhost:5000/api/wallet")
       .then(res => {
         if (res.data) {
@@ -377,12 +526,21 @@ export default function AlphaStream() {
 
     socket.on("disconnect", () => setSocketStatus("disconnected"));
 
+    socket.on("system_status", (payload) => {
+      if (payload.status === "OUTAGE") {
+        setSocketStatus("outage");
+      } else {
+        setSocketStatus("connected");
+      }
+    });
+
     socket.on("live_price_update", (payload) => {
       clearTimeout(staleTimerRef.current);
       setIsStale(false);
       staleTimerRef.current = setTimeout(() => setIsStale(true), 5000);
 
-      const isCurrentPair = payload.symbol.toLowerCase() === selectedPair.name.replace("/", "").toLowerCase();
+      const activePair = selectedPairRef.current;
+      const isCurrentPair = payload.symbol.toLowerCase() === activePair.name.replace("/", "").toLowerCase();
 
       setPairsList(list => list.map(p => {
         if (p.name.replace("/", "").toLowerCase() === payload.symbol.toLowerCase()) {
@@ -399,6 +557,17 @@ export default function AlphaStream() {
         });
 
         const newPrice = payload.price;
+        
+        // Push price to local buffer for WebWorker offloading
+        setLivePriceBuffer(prev => {
+          const updated = [...prev, newPrice];
+          if (updated.length > 100) updated.shift();
+          if (workerRef.current) {
+            workerRef.current.postMessage({ prices: updated });
+          }
+          return updated;
+        });
+
         setTrades(old => {
             const newTrade = {
                 id: Math.random().toString(),
@@ -412,25 +581,46 @@ export default function AlphaStream() {
 
         if (mainSeriesRef.current && volumeSeriesRef.current && chartDataRef.current.candles.length > 0) {
           const { candles, volumes } = chartDataRef.current;
-          const lastCandle = candles[candles.length - 1];
-          lastCandle.close = newPrice;
-          if (newPrice > lastCandle.high) lastCandle.high = newPrice;
-          if (newPrice < lastCandle.low) lastCandle.low = newPrice;
+          let lastCandle = candles[candles.length - 1];
+          let lastVol = volumes[volumes.length - 1];
           
-          const lastVol = volumes[volumes.length - 1];
-          lastVol.color = lastCandle.close >= lastCandle.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)";
-          lastVol.value += +(Math.random() * 2).toFixed(2);
+          const currentTf = timeframeRef.current;
+          const tfSec = Math.floor(currentTf.ms / 1000);
+          const currentBarTime = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
 
-          const timeStr = Math.floor(Date.now() / 1000);
-          lastCandle.time = timeStr;
-          lastVol.time = timeStr;
+          if (currentBarTime > lastCandle.time) {
+            const newCandle = {
+              time: currentBarTime,
+              open: lastCandle.close,
+              high: newPrice,
+              low: newPrice,
+              close: newPrice
+            };
+            const newVol = {
+              time: currentBarTime,
+              value: +(Math.random() * 2).toFixed(2),
+              color: newCandle.close >= newCandle.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)"
+            };
+            candles.push(newCandle);
+            volumes.push(newVol);
+            lastCandle = newCandle;
+            lastVol = newVol;
+          } else {
+            lastCandle.close = newPrice;
+            if (newPrice > lastCandle.high) lastCandle.high = newPrice;
+            if (newPrice < lastCandle.low) lastCandle.low = newPrice;
+            
+            lastVol.color = lastCandle.close >= lastCandle.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)";
+            lastVol.value += +(Math.random() * 2).toFixed(2);
+          }
 
           const updateObj = { time: lastCandle.time, open: lastCandle.open, high: lastCandle.high, low: lastCandle.low, close: lastCandle.close };
           const lineObj = { time: lastCandle.time, value: lastCandle.close };
           
-          if (chartType === "Bars" || chartType.toLowerCase().includes("candles")) {
+          const currentChartType = chartTypeRef.current;
+          if (currentChartType === "Bars" || currentChartType.toLowerCase().includes("candles")) {
             mainSeriesRef.current.update(updateObj);
-          } else if (chartType === "HLC area") {
+          } else if (currentChartType === "HLC area") {
             mainSeriesRef.current.update(lineObj);
             if (extraSeriesRefs.current.length >= 2) {
               extraSeriesRefs.current[0].update({ time: lastCandle.time, value: lastCandle.high });
@@ -445,30 +635,28 @@ export default function AlphaStream() {
     });
 
     socket.on("live_order_book", (payload) => {
-      if (payload.symbol.toLowerCase() === selectedPair.name.replace("/", "").toLowerCase()) {
-        let askTotal = 0;
-        const asks = payload.asks.slice(0, 16).map(a => {
-            askTotal += a.quantity;
-            return { price: a.price, amount: a.quantity, total: askTotal };
-        }).reverse();
-
-        let bidTotal = 0;
-        const bids = payload.bids.slice(0, 16).map(b => {
-            bidTotal += b.quantity;
-            return { price: b.price, amount: b.quantity, total: bidTotal };
-        });
-
-        setOrderBook({ asks, bids });
+      const activePair = selectedPairRef.current;
+      if (payload.symbol.toLowerCase() === activePair.name.replace("/", "").toLowerCase()) {
+        rawOrderBookRef.current = {
+          bids: payload.bids,
+          asks: payload.asks
+        };
+        orderBookPendingRef.current = true;
       }
     });
 
     socket.on("live_metrics_update", (payload) => {
-      if (payload.symbol.toLowerCase() === selectedPair.name.replace("/", "").toLowerCase()) {
+      const activePair = selectedPairRef.current;
+      if (payload.symbol.toLowerCase() === activePair.name.replace("/", "").toLowerCase()) {
         setMetrics(payload);
-        const timeStr = Math.floor(Date.now() / 1000);
-        if (showEMA) {
-            if (ema15SeriesRef.current && payload.ema15) ema15SeriesRef.current.update({ time: timeStr, value: payload.ema15 });
-            if (ema50SeriesRef.current && payload.ema50) ema50SeriesRef.current.update({ time: timeStr, value: payload.ema50 });
+        
+        const currentTf = timeframeRef.current;
+        const tfSec = Math.floor(currentTf.ms / 1000);
+        const currentBarTime = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
+        
+        if (showEMARef.current) {
+            if (ema15SeriesRef.current && payload.ema15) ema15SeriesRef.current.update({ time: currentBarTime, value: payload.ema15 });
+            if (ema50SeriesRef.current && payload.ema50) ema50SeriesRef.current.update({ time: currentBarTime, value: payload.ema50 });
         }
       }
     });
@@ -476,8 +664,12 @@ export default function AlphaStream() {
     return () => {
       socket.disconnect();
       clearTimeout(staleTimerRef.current);
+      clearInterval(orderBookInterval);
+      if (workerRef.current) {
+        workerRef.current.terminate();
+      }
     };
-  }, [selectedPair.name, chartType, showEMA]);
+  }, []);
 
   const filteredPairs = useMemo(() => 
     pairsList.filter((p) => p.name.toLowerCase().includes(pairSearch.toLowerCase())),
@@ -610,6 +802,16 @@ export default function AlphaStream() {
             STALE DATA WARNING
           </div>
         )}
+
+        {socketStatus === "outage" && (
+          <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", background: "rgba(239,68,68,0.95)", color: "#fff", padding: "24px 32px", borderRadius: "12px", zIndex: 1001, fontWeight: 700, fontSize: "18px", boxShadow: "0 8px 24px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", border: "2px solid #ef4444" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" strokeWidth="2.5" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01"/></svg>
+              <span>CRITICAL SYSTEM OUTAGE</span>
+            </div>
+            <span style={{ fontSize: "14px", fontWeight: 500, opacity: 0.9 }}>Binance exchange streams are currently offline. Circuit breaker activated.</span>
+          </div>
+        )}
         
         {/* ROW 1: Ticker Bar */}
         <div style={{ height: "48px", flexShrink: 0, display: "flex", alignItems: "center", gap: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-primary)", overflowX: "auto", overflowY: "hidden" }}>
@@ -732,17 +934,29 @@ export default function AlphaStream() {
               <div onClick={() => setShowEMA(!showEMA)} style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", background: showEMA ? "var(--bg-secondary)" : "transparent", padding: "2px 8px", borderRadius: "4px", border: showEMA ? "1px solid var(--accent)" : "1px solid var(--border)" }}>
                 <span className="mono" style={{ fontSize: "12px", fontWeight: 600, color: showEMA ? "var(--accent)" : "var(--text-secondary)" }}>EMA 15/50</span>
               </div>
+              <div onClick={() => setChartViewMode(prev => prev === "LWC" ? "SVG" : "LWC")} style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", background: chartViewMode === "SVG" ? "var(--bg-secondary)" : "transparent", padding: "2px 8px", borderRadius: "4px", border: chartViewMode === "SVG" ? "1px solid var(--accent)" : "1px solid var(--border)" }}>
+                <span className="mono" style={{ fontSize: "12px", fontWeight: 600, color: chartViewMode === "SVG" ? "var(--accent)" : "var(--text-secondary)" }}>Custom SVG Path Chart</span>
+              </div>
               <div style={{ display: "flex", gap: "16px", marginLeft: "auto" }}>
                 <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>Spread: <span style={{ color: "var(--text-primary)" }}>{metrics.spread ? metrics.spread.toFixed(2) : '-'}</span></span>
-                <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>Vol: <span style={{ color: "var(--text-primary)" }}>{metrics.volatility ? metrics.volatility.toFixed(4) : '-'}</span></span>
+                <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>Vol (Server): <span style={{ color: "var(--text-primary)" }}>{metrics.volatility ? metrics.volatility.toFixed(4) : '-'}</span></span>
+                <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>Vol (Worker): <span style={{ color: "var(--text-primary)" }}>{workerMetrics.volatility ? workerMetrics.volatility.toFixed(4) : '-'}</span></span>
+                <span className="mono" style={{ fontSize: "11px", color: "var(--text-secondary)" }}>EMA10 (Worker): <span style={{ color: "var(--text-primary)" }}>{workerMetrics.ema10 ? workerMetrics.ema10.toFixed(2) : '-'}</span></span>
               </div>
             </div>
 
             {/* ROW B4: Chart Container */}
-            <div ref={chartContainerRef} style={{ flex: 1, minHeight: 0, overflow: "hidden", position: "relative" }} />
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
+              <div ref={chartContainerRef} style={{ display: chartViewMode === "LWC" ? "block" : "none", width: "100%", height: "100%" }} />
+              {chartViewMode === "SVG" && (
+                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "16px", background: "var(--bg-primary)", overflow: "hidden" }}>
+                  <SvgChart data={livePriceBuffer.map(p => ({ price: p }))} emaData={workerMetrics.emaArray} />
+                </div>
+              )}
+            </div>
 
             {/* ROW B5: Trade Form */}
-            <div style={{ height: "200px", flexShrink: 0, borderTop: "2px solid var(--border)", padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px", background: "var(--bg-primary)" }}>
+            <div style={{ height: "280px", flexShrink: 0, borderTop: "2px solid var(--border)", padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px", background: "var(--bg-primary)" }}>
               {/* Form Tabs */}
               <div style={{ display: "flex", gap: "8px" }}>
                 {["Spot", "Cross", "Isolated"].map((t, i) => (
