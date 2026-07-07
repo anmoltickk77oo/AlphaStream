@@ -34,22 +34,71 @@ const INITIAL_PAIRS = [
   { name: "DOT/USDT", price: 5.61, change: 0.44 },
 ];
 
-function generateCandles(basePrice, timeframeMs = 3600000, count = 168) {
+// Helper for hashing strings to a 32-bit integer
+function getHashCode(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return hash;
+}
+
+// Simple seedable pseudo-random number generator (Mulberry32)
+function seedRandom(seed) {
+  return function() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+}
+
+// Deterministic price generator based on symbol, candle index and basePrice
+function getDeterministicPrice(symbol, idx, basePrice) {
+  const hash = getHashCode(symbol);
+  
+  const offset1 = (hash % 100) / 100;
+  const offset2 = ((hash >> 8) % 100) / 100;
+  const offset3 = ((hash >> 16) % 100) / 100;
+
+  // Wave cycles: low, medium, and high frequencies
+  const wave1 = Math.sin(idx * 0.05 + offset1 * Math.PI * 2) * 0.04;
+  const wave2 = Math.cos(idx * 0.15 + offset2 * Math.PI * 2) * 0.015;
+  const wave3 = Math.sin(idx * 0.4 + offset3 * Math.PI * 2) * 0.005;
+  
+  // Seeded noise
+  const seed = getHashCode(`${symbol}_candle_${idx}`);
+  const rand = seedRandom(seed);
+  const noise = (rand() - 0.5) * 0.003;
+
+  const totalChange = wave1 + wave2 + wave3 + noise;
+  return basePrice * (1 + totalChange);
+}
+
+function generateCandles(symbol, basePrice, timeframeMs = 3600000, count = 168) {
   const candles = [];
   const volumes = [];
-  let currentPrice = basePrice * 0.95;
   const now = Math.floor(Date.now() / 1000);
   const tfSec = Math.floor(timeframeMs / 1000);
   const alignedNow = Math.floor(now / tfSec) * tfSec;
   let time = alignedNow - ((count - 1) * tfSec);
 
   for (let i = 0; i < count; i++) {
-    const open = currentPrice;
-    const change = (Math.random() - 0.48) * currentPrice * 0.01;
-    const close = +(open + change).toFixed(2);
-    const high = +(Math.max(open, close) + Math.random() * currentPrice * 0.005).toFixed(2);
-    const low = +(Math.min(open, close) - Math.random() * currentPrice * 0.005).toFixed(2);
-    const vol = +(Math.random() * 100 + 10).toFixed(2);
+    const idx = time / tfSec;
+    const open = +getDeterministicPrice(symbol, idx - 1, basePrice).toFixed(2);
+    const close = +getDeterministicPrice(symbol, idx, basePrice).toFixed(2);
+    
+    const seed = getHashCode(`${symbol}_candle_${idx}`);
+    const rand = seedRandom(seed);
+    
+    // Add realistic wick shadows
+    const highOffset = rand() * close * 0.004;
+    const lowOffset = rand() * close * 0.004;
+    const high = +(Math.max(open, close) + highOffset).toFixed(2);
+    const low = +(Math.min(open, close) - lowOffset).toFixed(2);
+    
+    const vol = +(rand() * 100 + 10).toFixed(2);
     
     candles.push({ time, open, high, low, close });
     volumes.push({
@@ -58,7 +107,6 @@ function generateCandles(basePrice, timeframeMs = 3600000, count = 168) {
       color: close >= open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)",
     });
     
-    currentPrice = close;
     time += tfSec;
   }
   const last = candles[candles.length - 1];
@@ -69,6 +117,116 @@ function generateCandles(basePrice, timeframeMs = 3600000, count = 168) {
 
   return { candles, volumes };
 }
+
+// Shared Formatters
+const format24hChange = (changePercent) => {
+  const isPositive = changePercent >= 0;
+  const sign = isPositive ? "+" : "";
+  const color = isPositive ? "#0ecb81" : "#f6465d";
+  const formatted = `${sign}${changePercent.toFixed(2)}%`;
+  return { color, formatted, sign, isPositive };
+};
+
+const formatPrice = (price) => {
+  if (price === undefined || price === null || isNaN(price)) return "0.00";
+  return price > 100 ? price.toFixed(2) : price.toFixed(5);
+};
+
+class MarketStore {
+  constructor() {
+    this.store = {}; // Keyed by symbol name, e.g. "BTC/USDT"
+    this.listeners = [];
+  }
+
+  initializeSymbol(symbol, initialPrice) {
+    if (this.store[symbol]) return;
+
+    // Generate 26 hours of historical hourly candles to seed the buffer (since timeframeMs = 3600000)
+    const { candles } = generateCandles(symbol, initialPrice, 3600000, 26);
+    const history = candles.map(c => ({
+      timestamp: c.time * 1000,
+      price: c.close
+    }));
+
+    const lastPrice = initialPrice;
+    const price24hAgo = history[0] ? history[0].price : initialPrice;
+    const changeAbs = lastPrice - price24hAgo;
+    const changePercent = price24hAgo !== 0 ? (changeAbs / price24hAgo) * 100 : 0;
+
+    this.store[symbol] = {
+      lastPrice,
+      price24hAgo,
+      changeAbs,
+      changePercent,
+      lastUpdated: Date.now(),
+      history
+    };
+  }
+
+  updateSymbol(symbol, price) {
+    let data = this.store[symbol];
+    if (!data) {
+      this.initializeSymbol(symbol, price);
+      data = this.store[symbol];
+    }
+
+    const now = Date.now();
+    data.lastPrice = price;
+    data.lastUpdated = now;
+    data.history.push({ timestamp: now, price });
+
+    // Prune entries older than 25 hours
+    const pruneTime = now - 25 * 60 * 60 * 1000;
+    data.history = data.history.filter(h => h.timestamp >= pruneTime);
+
+    // Find closest entry to exactly 24 hours ago
+    const targetTime = now - 24 * 60 * 60 * 1000;
+    let closestEntry = data.history[0];
+    let minDiff = Math.abs(closestEntry.timestamp - targetTime);
+
+    for (let i = 1; i < data.history.length; i++) {
+      const diff = Math.abs(data.history[i].timestamp - targetTime);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestEntry = data.history[i];
+      }
+    }
+
+    if (closestEntry) {
+      data.price24hAgo = closestEntry.price;
+    } else {
+      data.price24hAgo = price;
+    }
+
+    data.changeAbs = data.lastPrice - data.price24hAgo;
+    data.changePercent = data.price24hAgo !== 0 ? (data.changeAbs / data.price24hAgo) * 100 : 0;
+
+    this.notify(symbol, data);
+  }
+
+  getData(symbol) {
+    return this.store[symbol] || {
+      lastPrice: 0,
+      price24hAgo: 0,
+      changeAbs: 0,
+      changePercent: 0,
+      lastUpdated: Date.now()
+    };
+  }
+
+  subscribe(listener) {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== listener);
+    };
+  }
+
+  notify(symbol, data) {
+    this.listeners.forEach(listener => listener(symbol, data));
+  }
+}
+
+const MarketDataStore = new MarketStore();
 
 function calculateHistoricalEMA(candles, period) {
   if (candles.length < period) return [];
@@ -256,6 +414,22 @@ export default function AlphaStream() {
   const orderBookPendingRef = useRef(false);
 
   const [theme, setTheme] = useState(() => localStorage.getItem('alphastream-theme') || 'dark');
+  const [leftWidth, setLeftWidth] = useState(220);
+  const [rightWidth, setRightWidth] = useState(280);
+  const [formHeight, setFormHeight] = useState(280);
+  const [storeData, setStoreData] = useState(() => {
+    const initial = {};
+    INITIAL_PAIRS.forEach(p => {
+      initial[p.name] = {
+        lastPrice: p.price,
+        price24hAgo: p.price * (1 - p.change / 100),
+        changeAbs: p.price * (p.change / 100),
+        changePercent: p.change,
+        lastUpdated: Date.now()
+      };
+    });
+    return initial;
+  });
   const [chartType, setChartType] = useState("Candles");
   const [showChartTypePicker, setShowChartTypePicker] = useState(false);
 
@@ -265,6 +439,32 @@ export default function AlphaStream() {
   const [timeframe, setTimeframe] = useState(TIMEFRAMES[4]);
 
   const [price, setPrice] = useState(selectedPair.price);
+  const priceRef = useRef(selectedPair.price);
+  
+  useEffect(() => {
+    priceRef.current = price;
+  }, [price]);
+
+  useEffect(() => {
+    INITIAL_PAIRS.forEach(p => {
+      MarketDataStore.initializeSymbol(p.name, p.price);
+    });
+
+    const unsubscribe = MarketDataStore.subscribe((symbol, data) => {
+      setStoreData(prev => ({
+        ...prev,
+        [symbol]: {
+          lastPrice: data.lastPrice,
+          price24hAgo: data.price24hAgo,
+          changeAbs: data.changeAbs,
+          changePercent: data.changePercent,
+          lastUpdated: data.lastUpdated
+        }
+      }));
+    });
+    return unsubscribe;
+  }, []);
+
   const [priceDir, setPriceDir] = useState(1);
   const [orderBook, setOrderBook] = useState(() => generateOrderBook(selectedPair.price));
   const [trades, setTrades] = useState(() => generateInitialTrades(selectedPair.price));
@@ -367,11 +567,16 @@ export default function AlphaStream() {
 
   // Re-generate Data
   useEffect(() => {
-    const { candles, volumes } = generateCandles(selectedPair.price, timeframe.ms);
+    const { candles, volumes } = generateCandles(selectedPair.name, selectedPair.price, timeframe.ms);
     chartDataRef.current = { candles, volumes };
     setPrice(selectedPair.price);
     setBuyPrice(selectedPair.price.toFixed(2));
-    setOrderBook(generateOrderBook(selectedPair.price));
+    const initialOrderBook = generateOrderBook(selectedPair.price);
+    setOrderBook(initialOrderBook);
+    rawOrderBookRef.current = {
+      bids: initialOrderBook.bids,
+      asks: initialOrderBook.asks
+    };
     setTrades(generateInitialTrades(selectedPair.price));
 
     // Seed price buffer for WebWorker calculations
@@ -493,19 +698,6 @@ export default function AlphaStream() {
         });
     };
 
-    // 2. Order book update interval (2 times per second)
-    const orderBookInterval = setInterval(() => {
-        if (orderBookPendingRef.current) {
-            orderBookPendingRef.current = false;
-            const currentP = selectedPairRef.current.price;
-            const aggregated = aggregateOrderBook(
-                rawOrderBookRef.current.bids,
-                rawOrderBookRef.current.asks,
-                currentP
-            );
-            setOrderBook(aggregated);
-        }
-    }, 500);
 
     axios.get("http://localhost:5000/api/wallet")
       .then(res => {
@@ -542,10 +734,15 @@ export default function AlphaStream() {
       const activePair = selectedPairRef.current;
       const isCurrentPair = payload.symbol.toLowerCase() === activePair.name.replace("/", "").toLowerCase();
 
+      const matchingPair = INITIAL_PAIRS.find(p => p.name.replace("/", "").toLowerCase() === payload.symbol.toLowerCase());
+      if (matchingPair) {
+        MarketDataStore.updateSymbol(matchingPair.name, payload.price);
+      }
+
       setPairsList(list => list.map(p => {
         if (p.name.replace("/", "").toLowerCase() === payload.symbol.toLowerCase()) {
-          const chg = ((payload.price - p.price) / p.price) * 100;
-          return { ...p, price: payload.price, change: isNaN(chg) ? 0 : chg };
+          const data = MarketDataStore.getData(p.name);
+          return { ...p, price: data.lastPrice, change: data.changePercent };
         }
         return p;
       }));
@@ -557,6 +754,14 @@ export default function AlphaStream() {
         });
 
         const newPrice = payload.price;
+
+        // Update orderbook immediately on price update to ensure buckets are centered around live price
+        const aggregated = aggregateOrderBook(
+          rawOrderBookRef.current.bids,
+          rawOrderBookRef.current.asks,
+          newPrice
+        );
+        setOrderBook(aggregated);
         
         // Push price to local buffer for WebWorker offloading
         setLivePriceBuffer(prev => {
@@ -641,7 +846,12 @@ export default function AlphaStream() {
           bids: payload.bids,
           asks: payload.asks
         };
-        orderBookPendingRef.current = true;
+        const aggregated = aggregateOrderBook(
+          payload.bids,
+          payload.asks,
+          priceRef.current
+        );
+        setOrderBook(aggregated);
       }
     });
 
@@ -664,7 +874,6 @@ export default function AlphaStream() {
     return () => {
       socket.disconnect();
       clearTimeout(staleTimerRef.current);
-      clearInterval(orderBookInterval);
       if (workerRef.current) {
         workerRef.current.terminate();
       }
@@ -739,6 +948,78 @@ export default function AlphaStream() {
     }
   }, [buyAmt, buyPrice, btcBal, selectedPair.name]);
 
+  const startResizingLeft = useCallback((e) => {
+    e.preventDefault();
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const startX = e.clientX;
+    const startWidth = leftWidth;
+    
+    const doDrag = (moveEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const newWidth = Math.max(150, Math.min(500, startWidth + deltaX));
+      setLeftWidth(newWidth);
+    };
+    
+    const stopDrag = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", doDrag);
+      window.removeEventListener("mouseup", stopDrag);
+    };
+    
+    window.addEventListener("mousemove", doDrag);
+    window.addEventListener("mouseup", stopDrag);
+  }, [leftWidth]);
+
+  const startResizingRight = useCallback((e) => {
+    e.preventDefault();
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const startX = e.clientX;
+    const startWidth = rightWidth;
+    
+    const doDrag = (moveEvent) => {
+      const deltaX = startX - moveEvent.clientX;
+      const newWidth = Math.max(200, Math.min(600, startWidth + deltaX));
+      setRightWidth(newWidth);
+    };
+    
+    const stopDrag = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", doDrag);
+      window.removeEventListener("mouseup", stopDrag);
+    };
+    
+    window.addEventListener("mousemove", doDrag);
+    window.addEventListener("mouseup", stopDrag);
+  }, [rightWidth]);
+
+  const startResizingVertical = useCallback((e) => {
+    e.preventDefault();
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    const startY = e.clientY;
+    const startHeight = formHeight;
+    
+    const doDrag = (moveEvent) => {
+      const deltaY = startY - moveEvent.clientY;
+      const newHeight = Math.max(180, Math.min(600, startHeight + deltaY));
+      setFormHeight(newHeight);
+    };
+    
+    const stopDrag = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", doDrag);
+      window.removeEventListener("mouseup", stopDrag);
+    };
+    
+    window.addEventListener("mousemove", doDrag);
+    window.addEventListener("mouseup", stopDrag);
+  }, [formHeight]);
+
   const applyPercent = useCallback((pct, type) => {
     const p = parseFloat(buyPrice) || price;
     if (type === "buy") {
@@ -792,6 +1073,54 @@ export default function AlphaStream() {
         .sell-btn:hover { background: #d63651; transform: scale(1.01); }
         .sell-btn:active { transform: scale(0.99); }
         .pct-btn:hover { border-color: var(--accent) !important; color: var(--accent) !important; }
+
+        /* Panel Resizing Drag Handles */
+        .resize-handle-h {
+          width: 4px;
+          cursor: col-resize;
+          background: var(--border);
+          position: relative;
+          transition: background 0.15s;
+          flex-shrink: 0;
+          z-index: 50;
+        }
+        .resize-handle-h:hover {
+          background: var(--accent);
+        }
+        .resize-handle-v {
+          height: 4px;
+          cursor: row-resize;
+          background: var(--border);
+          position: relative;
+          transition: background 0.15s;
+          flex-shrink: 0;
+          z-index: 50;
+        }
+        .resize-handle-v:hover {
+          background: var(--accent);
+        }
+
+        /* Bottom Scrolling Ticker */
+        @keyframes marquee {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+        .marquee-container {
+          display: flex;
+          overflow: hidden;
+          white-space: nowrap;
+          width: 100%;
+          position: relative;
+        }
+        .marquee-track {
+          display: flex;
+          align-items: center;
+          gap: 32px;
+          animation: marquee 30s linear infinite;
+        }
+        .marquee-track:hover {
+          animation-play-state: paused;
+        }
       `}</style>
 
       <div style={{ display: "flex", flexDirection: "column", width: "100vw", height: "100vh", overflow: "hidden", background: "var(--bg-primary)", color: "var(--text-primary)", boxSizing: "border-box" }}>
@@ -815,15 +1144,19 @@ export default function AlphaStream() {
         
         {/* ROW 1: Ticker Bar */}
         <div style={{ height: "48px", flexShrink: 0, display: "flex", alignItems: "center", gap: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-primary)", overflowX: "auto", overflowY: "hidden" }}>
-          {pairsList.map((p) => (
-            <div className="hover-btn" key={p.name} onClick={() => setSelectedPair(p)} style={{ minWidth: "120px", padding: "0 16px", display: "flex", flexDirection: "column", justifyContent: "center", cursor: "pointer", borderRight: "1px solid var(--border)", height: "100%" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <span style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }}>{p.name}</span>
-                <span style={{ fontSize: "12px", fontWeight: 600, color: p.change >= 0 ? "#0ecb81" : "#f6465d" }}>{p.change >= 0 ? "+" : ""}{p.change.toFixed(2)}%</span>
+          {INITIAL_PAIRS.map((p) => {
+            const data = storeData[p.name] || { lastPrice: p.price, changePercent: p.change };
+            const { color, formatted } = format24hChange(data.changePercent);
+            return (
+              <div className="hover-btn" key={p.name} onClick={() => setSelectedPair(p)} data-symbol={p.name.replace("/", "")} style={{ minWidth: "120px", padding: "0 16px", display: "flex", flexDirection: "column", justifyContent: "center", cursor: "pointer", borderRight: "1px solid var(--border)", height: "100%" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }}>{p.name}</span>
+                  <span className="ticker-change" style={{ fontSize: "12px", fontWeight: 600, color }}>{formatted}</span>
+                </div>
+                <span className="mono ticker-price" style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginTop: "2px" }}>{formatPrice(data.lastPrice)}</span>
               </div>
-              <span className="mono" style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginTop: "2px" }}>{p.price.toFixed(p.price > 100 ? 2 : 5)}</span>
-            </div>
-          ))}
+            );
+          })}
           <div style={{ marginLeft: "auto", padding: "0 16px", display: "flex", alignItems: "center", cursor: "pointer" }} onClick={toggleTheme}>
             {theme === 'light' ? moonIcon : sunIcon}
           </div>
@@ -833,7 +1166,7 @@ export default function AlphaStream() {
         <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
           
           {/* COL A: Order Book */}
-          <div style={{ width: "220px", flexShrink: 0, overflow: "hidden", display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)" }}>
+          <div style={{ width: `${leftWidth}px`, flexShrink: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
             <div style={{ padding: "8px 10px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>Order Book</div>
             <div style={{ display: "flex", padding: "4px 10px", fontSize: "11px", fontWeight: 500, color: "var(--text-secondary)", borderBottom: "1px solid var(--border)" }}>
               <span style={{ width: "90px", textAlign: "left" }}>Price</span>
@@ -870,20 +1203,29 @@ export default function AlphaStream() {
             </div>
           </div>
 
+          {/* Left Resizer Drag Handle */}
+          <div className="resize-handle-h" onMouseDown={startResizingLeft} />
+
           {/* COL B: Center */}
           <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
             
             {/* ROW B1: Pair header */}
-            <div style={{ height: "48px", flexShrink: 0, padding: "0 16px", display: "flex", alignItems: "center", gap: "24px", borderBottom: "1px solid var(--border)" }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: "8px" }}>
-                <span style={{ fontSize: "18px", fontWeight: 700 }}>{selectedPair.name}</span>
-                <span className="mono" style={{ fontSize: "22px", fontWeight: 700, color: selectedPair.change >= 0 ? "#0ecb81" : "#f6465d" }}>{price.toFixed(price > 100 ? 2 : 5)}</span>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>24h Change</span>
-                <span style={{ fontSize: "13px", fontWeight: 400, color: selectedPair.change >= 0 ? "#0ecb81" : "#f6465d" }}>{selectedPair.change >= 0 ? "+" : ""}{selectedPair.change.toFixed(2)}%</span>
-              </div>
-            </div>
+            {(() => {
+              const data = storeData[selectedPair.name] || { lastPrice: selectedPair.price, changePercent: selectedPair.change };
+              const { color, formatted } = format24hChange(data.changePercent);
+              return (
+                <div data-symbol={selectedPair.name.replace("/", "")} style={{ height: "48px", flexShrink: 0, padding: "0 16px", display: "flex", alignItems: "center", gap: "24px", borderBottom: "1px solid var(--border)" }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: "8px" }}>
+                    <span style={{ fontSize: "18px", fontWeight: 700 }}>{selectedPair.name}</span>
+                    <span className="mono header-price" style={{ fontSize: "22px", fontWeight: 700, color }}>{formatPrice(data.lastPrice)}</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                    <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>24h Change</span>
+                    <span className="header-change" style={{ fontSize: "13px", fontWeight: 600, color }}>{formatted}</span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* ROW B2: Chart Toolbar */}
             <div style={{ height: "36px", flexShrink: 0, display: "flex", alignItems: "center", padding: "0 12px", gap: "8px", borderBottom: "1px solid var(--border)" }}>
@@ -955,8 +1297,11 @@ export default function AlphaStream() {
               )}
             </div>
 
+            {/* Vertical Resizer Drag Handle */}
+            <div className="resize-handle-v" onMouseDown={startResizingVertical} />
+
             {/* ROW B5: Trade Form */}
-            <div style={{ height: "280px", flexShrink: 0, borderTop: "2px solid var(--border)", padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px", background: "var(--bg-primary)" }}>
+            <div style={{ height: `${formHeight}px`, flexShrink: 0, padding: "12px 16px", display: "flex", flexDirection: "column", gap: "8px", background: "var(--bg-primary)" }}>
               {/* Form Tabs */}
               <div style={{ display: "flex", gap: "8px" }}>
                 {["Spot", "Cross", "Isolated"].map((t, i) => (
@@ -1026,8 +1371,11 @@ export default function AlphaStream() {
             </div>
           </div>
 
+          {/* Right Resizer Drag Handle */}
+          <div className="resize-handle-h" onMouseDown={startResizingRight} />
+
           {/* COL C: Right Panel */}
-          <div style={{ width: "280px", flexShrink: 0, overflow: "hidden", borderLeft: "1px solid var(--border)", display: "flex", flexDirection: "column" }}>
+          <div style={{ width: `${rightWidth}px`, flexShrink: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
             
             {/* Markets */}
             <div style={{ flexShrink: 0 }}>
@@ -1039,13 +1387,15 @@ export default function AlphaStream() {
                 <span style={{ textAlign: "right" }}>24h Chg</span>
               </div>
               <div style={{ maxHeight: `${8 * 32}px`, overflowY: "auto" }}>
-                {filteredPairs.map((p) => {
+                {INITIAL_PAIRS.filter((p) => p.name.toLowerCase().includes(pairSearch.toLowerCase())).map((p) => {
                   const isSel = selectedPair.name === p.name;
+                  const data = storeData[p.name] || { lastPrice: p.price, changePercent: p.change };
+                  const { color, formatted } = format24hChange(data.changePercent);
                   return (
-                    <div key={p.name} onClick={() => setSelectedPair(p)} style={{ height: "32px", padding: "0 12px", display: "grid", gridTemplateColumns: "80px 1fr 70px", alignItems: "center", cursor: "pointer", background: isSel ? "var(--bg-secondary)" : "transparent", borderLeft: isSel ? "2px solid var(--accent)" : "2px solid transparent" }}>
+                    <div key={p.name} onClick={() => setSelectedPair(p)} data-symbol={p.name.replace("/", "")} style={{ height: "32px", padding: "0 12px", display: "grid", gridTemplateColumns: "80px 1fr 70px", alignItems: "center", cursor: "pointer", background: isSel ? "var(--bg-secondary)" : "transparent", borderLeft: isSel ? "2px solid var(--accent)" : "2px solid transparent" }}>
                       <span style={{ fontSize: "13px", fontWeight: 600, color: "var(--text-primary)", marginLeft: isSel ? "-2px" : "0" }}>{p.name.split("/")[0]}</span>
-                      <span className="mono" style={{ fontSize: "13px", textAlign: "right" }}>{p.price > 100 ? p.price.toFixed(2) : p.price.toFixed(5)}</span>
-                      <span style={{ fontSize: "13px", fontWeight: 600, textAlign: "right", color: p.change >= 0 ? "#0ecb81" : "#f6465d" }}>{p.change >= 0 ? "+" : ""}{p.change.toFixed(2)}%</span>
+                      <span className="mono sidebar-price" style={{ fontSize: "13px", textAlign: "right" }}>{formatPrice(data.lastPrice)}</span>
+                      <span className="sidebar-change" style={{ fontSize: "13px", fontWeight: 600, textAlign: "right", color }}>{formatted}</span>
                     </div>
                   );
                 })}
@@ -1074,18 +1424,37 @@ export default function AlphaStream() {
         </div>
 
         {/* ROW 3: Status Bar */}
-        <div style={{ height: "28px", flexShrink: 0, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 12px", gap: "24px", background: "var(--bg-secondary)", fontSize: "12px", fontWeight: 500, overflow: "hidden" }}>
-          <span style={{ color: socketStatus === 'connected' ? "#0ecb81" : "#f6465d", flexShrink: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+        <div style={{ height: "28px", flexShrink: 0, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", padding: "0 12px", background: "var(--bg-secondary)", fontSize: "12px", fontWeight: 500, overflow: "hidden" }}>
+          <span style={{ color: socketStatus === 'connected' ? "#0ecb81" : "#f6465d", flexShrink: 0, display: "flex", alignItems: "center", gap: "6px", background: "var(--bg-secondary)", paddingRight: "16px", zIndex: 10, height: "100%", boxShadow: "4px 0 8px rgba(0,0,0,0.15)" }}>
             <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: socketStatus === 'connected' ? "#0ecb81" : "#f6465d" }}></span>
             {socketStatus === 'connected' ? "LIVE WEBSOCKET CONNECTED" : "WEBSOCKET DISCONNECTED"}
           </span>
-          {pairsList.slice(0, 10).map((p) => (
-            <div key={p.name} style={{ display: "flex", gap: "6px", flexShrink: 0, color: "var(--text-secondary)" }}>
-              <span>{p.name}</span>
-              <span style={{ color: p.change >= 0 ? "#0ecb81" : "#f6465d" }}>{p.change >= 0 ? "+" : ""}{p.change.toFixed(2)}%</span>
-              <span className="mono">{p.price > 100 ? p.price.toFixed(2) : p.price.toFixed(5)}</span>
+          <div className="marquee-container">
+            <div className="marquee-track">
+              {INITIAL_PAIRS.slice(0, 10).map((p) => {
+                const data = storeData[p.name] || { lastPrice: p.price, changePercent: p.change };
+                const { color, formatted } = format24hChange(data.changePercent);
+                return (
+                  <div key={p.name} data-symbol={p.name.replace("/", "")} style={{ display: "flex", gap: "6px", flexShrink: 0, color: "var(--text-secondary)" }}>
+                    <span>{p.name}</span>
+                    <span className="bottom-change" style={{ color }}>{formatted}</span>
+                    <span className="mono bottom-price">{formatPrice(data.lastPrice)}</span>
+                  </div>
+                );
+              })}
+              {INITIAL_PAIRS.slice(0, 10).map((p) => {
+                const data = storeData[p.name] || { lastPrice: p.price, changePercent: p.change };
+                const { color, formatted } = format24hChange(data.changePercent);
+                return (
+                  <div key={`${p.name}-dup`} data-symbol={p.name.replace("/", "")} style={{ display: "flex", gap: "6px", flexShrink: 0, color: "var(--text-secondary)" }}>
+                    <span>{p.name}</span>
+                    <span className="bottom-change" style={{ color }}>{formatted}</span>
+                    <span className="mono bottom-price">{formatPrice(data.lastPrice)}</span>
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          </div>
         </div>
 
       </div>
