@@ -46,7 +46,7 @@ function getHashCode(str) {
 
 // Simple seedable pseudo-random number generator (Mulberry32)
 function seedRandom(seed) {
-  return function() {
+  return function () {
     let t = seed += 0x6D2B79F5;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
@@ -57,7 +57,7 @@ function seedRandom(seed) {
 // Deterministic price generator based on symbol, candle index and basePrice
 function getDeterministicPrice(symbol, idx, basePrice) {
   const hash = getHashCode(symbol);
-  
+
   const offset1 = (hash % 100) / 100;
   const offset2 = ((hash >> 8) % 100) / 100;
   const offset3 = ((hash >> 16) % 100) / 100;
@@ -66,7 +66,7 @@ function getDeterministicPrice(symbol, idx, basePrice) {
   const wave1 = Math.sin(idx * 0.05 + offset1 * Math.PI * 2) * 0.04;
   const wave2 = Math.cos(idx * 0.15 + offset2 * Math.PI * 2) * 0.015;
   const wave3 = Math.sin(idx * 0.4 + offset3 * Math.PI * 2) * 0.005;
-  
+
   // Seeded noise
   const seed = getHashCode(`${symbol}_candle_${idx}`);
   const rand = seedRandom(seed);
@@ -88,25 +88,25 @@ function generateCandles(symbol, basePrice, timeframeMs = 3600000, count = 168) 
     const idx = time / tfSec;
     const open = +getDeterministicPrice(symbol, idx - 1, basePrice).toFixed(2);
     const close = +getDeterministicPrice(symbol, idx, basePrice).toFixed(2);
-    
+
     const seed = getHashCode(`${symbol}_candle_${idx}`);
     const rand = seedRandom(seed);
-    
+
     // Add realistic wick shadows
     const highOffset = rand() * close * 0.004;
     const lowOffset = rand() * close * 0.004;
     const high = +(Math.max(open, close) + highOffset).toFixed(2);
     const low = +(Math.min(open, close) - lowOffset).toFixed(2);
-    
+
     const vol = +(rand() * 100 + 10).toFixed(2);
-    
+
     candles.push({ time, open, high, low, close });
     volumes.push({
       time,
       value: vol,
       color: close >= open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)",
     });
-    
+
     time += tfSec;
   }
   const last = candles[candles.length - 1];
@@ -231,22 +231,22 @@ const MarketDataStore = new MarketStore();
 function calculateHistoricalEMA(candles, period) {
   if (candles.length < period) return [];
   const emaData = [];
-  
+
   // Calculate seed SMA
   const seedSlice = candles.slice(0, period);
   const sma = seedSlice.reduce((sum, c) => sum + c.close, 0) / period;
   emaData.push({ time: candles[period - 1].time, value: sma });
-  
+
   const multiplier = 2 / (period + 1);
   let prevEMA = sma;
-  
+
   for (let i = period; i < candles.length; i++) {
     const currentPrice = candles[i].close;
     const emaValue = (currentPrice - prevEMA) * multiplier + prevEMA;
     emaData.push({ time: candles[i].time, value: emaValue });
     prevEMA = emaValue;
   }
-  
+
   return emaData;
 }
 
@@ -295,16 +295,16 @@ const TIMEFRAMES = [
 ];
 
 const ICONS = {
-  "Bars": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><path d="M5 4v10M5 8h3M5 12H2M13 3v12M13 6h3M13 14h-3"/></svg>,
-  "Candles": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><rect x="4" y="6" width="3" height="6"/><path d="M5.5 3v3m0 6v3"/><rect x="11" y="4" width="3" height="10" fill="currentColor"/><path d="M12.5 1v3m0 10v3"/></svg>,
-  "Hollow candles": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><rect x="4" y="6" width="3" height="6"/><path d="M5.5 3v3m0 6v3"/><rect x="11" y="4" width="3" height="10"/><path d="M12.5 1v3m0 10v3"/></svg>,
-  "Volume candles": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><rect x="3" y="6" width="5" height="6" fill="currentColor"/><path d="M5.5 3v3m0 6v3"/><rect x="12" y="4" width="1" height="10" fill="currentColor"/><path d="M12.5 1v3m0 10v3"/></svg>,
-  "Line": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9"/></svg>,
-  "Line with markers": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9"/><circle cx="6" cy="8" r="1.5" fill="currentColor"/><circle cx="10" cy="12" r="1.5" fill="currentColor"/><circle cx="16" cy="3" r="1.5" fill="currentColor"/></svg>,
-  "Step line": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 h4 v-6 h4 v4 h6 v-9 h2"/></svg>,
-  "Area": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9 v15 h-14 z" stroke="none" fill="currentColor" opacity="0.3"/><path d="M2 14 l4 -6 l4 4 l6 -9" fill="none"/></svg>,
-  "HLC area": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9"/><path d="M2 12 l4 -7 l4 5 l6 -10" strokeWidth="0.5" opacity="0.5"/><path d="M2 16 l4 -5 l4 3 l6 -8" strokeWidth="0.5" opacity="0.5"/></svg>,
-  "Baseline": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M1 9 h16" strokeDasharray="2 2" strokeOpacity="0.5"/><path d="M2 14 l4 -6 l4 4 l6 -9"/></svg>,
+  "Bars": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><path d="M5 4v10M5 8h3M5 12H2M13 3v12M13 6h3M13 14h-3" /></svg>,
+  "Candles": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><rect x="4" y="6" width="3" height="6" /><path d="M5.5 3v3m0 6v3" /><rect x="11" y="4" width="3" height="10" fill="currentColor" /><path d="M12.5 1v3m0 10v3" /></svg>,
+  "Hollow candles": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><rect x="4" y="6" width="3" height="6" /><path d="M5.5 3v3m0 6v3" /><rect x="11" y="4" width="3" height="10" /><path d="M12.5 1v3m0 10v3" /></svg>,
+  "Volume candles": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none"><rect x="3" y="6" width="5" height="6" fill="currentColor" /><path d="M5.5 3v3m0 6v3" /><rect x="12" y="4" width="1" height="10" fill="currentColor" /><path d="M12.5 1v3m0 10v3" /></svg>,
+  "Line": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9" /></svg>,
+  "Line with markers": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9" /><circle cx="6" cy="8" r="1.5" fill="currentColor" /><circle cx="10" cy="12" r="1.5" fill="currentColor" /><circle cx="16" cy="3" r="1.5" fill="currentColor" /></svg>,
+  "Step line": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 h4 v-6 h4 v4 h6 v-9 h2" /></svg>,
+  "Area": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9 v15 h-14 z" stroke="none" fill="currentColor" opacity="0.3" /><path d="M2 14 l4 -6 l4 4 l6 -9" fill="none" /></svg>,
+  "HLC area": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M2 14 l4 -6 l4 4 l6 -9" /><path d="M2 12 l4 -7 l4 5 l6 -10" strokeWidth="0.5" opacity="0.5" /><path d="M2 16 l4 -5 l4 3 l6 -8" strokeWidth="0.5" opacity="0.5" /></svg>,
+  "Baseline": <svg viewBox="0 0 18 18" width="18" height="18" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round"><path d="M1 9 h16" strokeDasharray="2 2" strokeOpacity="0.5" /><path d="M2 14 l4 -6 l4 4 l6 -9" /></svg>,
 };
 
 const CHART_GROUPS = [
@@ -317,7 +317,7 @@ function aggregateOrderBook(bids, asks, currentPrice) {
   if (!currentPrice || currentPrice <= 0 || !bids || !asks) return { bids: [], asks: [] };
 
   const bucketSizePercent = 0.001; // 0.1% of current price
-  
+
   // Initialize 10 ask buckets (ascending from current price)
   const askBuckets = Array.from({ length: 10 }, (_, i) => {
     const lowerBound = currentPrice * (1 + i * bucketSizePercent);
@@ -383,7 +383,7 @@ function aggregateOrderBook(bids, asks, currentPrice) {
 
 export default function AlphaStream() {
   const lwc = useLightweightCharts();
-  
+
   // Font Injection
   useEffect(() => {
     if (!document.getElementById("inter-font")) {
@@ -399,7 +399,7 @@ export default function AlphaStream() {
   const [isStale, setIsStale] = useState(false);
   const [metrics, setMetrics] = useState({ spread: 0, volatility: 0, ema15: null, ema50: null });
   const [showEMA, setShowEMA] = useState(false);
-  
+
   const ema15SeriesRef = useRef(null);
   const ema50SeriesRef = useRef(null);
   const staleTimerRef = useRef(null);
@@ -440,7 +440,7 @@ export default function AlphaStream() {
 
   const [price, setPrice] = useState(selectedPair.price);
   const priceRef = useRef(selectedPair.price);
-  
+
   useEffect(() => {
     priceRef.current = price;
   }, [price]);
@@ -468,7 +468,7 @@ export default function AlphaStream() {
   const [priceDir, setPriceDir] = useState(1);
   const [orderBook, setOrderBook] = useState(() => generateOrderBook(selectedPair.price));
   const [trades, setTrades] = useState(() => generateInitialTrades(selectedPair.price));
-  
+
   const [wallet, setWallet] = useState(10000);
   const [btcBal, setBtcBal] = useState(0.0);
   const [buyPrice, setBuyPrice] = useState(selectedPair.price.toFixed(2));
@@ -552,7 +552,7 @@ export default function AlphaStream() {
         chartRef.current.applyOptions({ width, height });
       }
     };
-    
+
     const observer = new ResizeObserver(handleResize);
     observer.observe(chartContainerRef.current);
 
@@ -583,7 +583,7 @@ export default function AlphaStream() {
     const initialPrices = candles.map(c => c.close);
     setLivePriceBuffer(initialPrices);
     if (workerRef.current) {
-        workerRef.current.postMessage({ prices: initialPrices });
+      workerRef.current.postMessage({ prices: initialPrices });
     }
   }, [selectedPair.name, timeframe]);
 
@@ -600,8 +600,15 @@ export default function AlphaStream() {
       grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
     });
 
-    if (mainSeriesRef.current) chart.removeSeries(mainSeriesRef.current);
-    extraSeriesRefs.current.forEach(s => chart.removeSeries(s));
+    try {
+      if (mainSeriesRef.current) chart.removeSeries(mainSeriesRef.current);
+    } catch (e) { }
+
+    extraSeriesRefs.current.forEach(s => {
+      try {
+        if (s) chart.removeSeries(s);
+      } catch (e) { }
+    });
     extraSeriesRefs.current = [];
 
     const { candles, volumes } = chartDataRef.current;
@@ -612,13 +619,13 @@ export default function AlphaStream() {
     }
 
     if (showEMA) {
-        ema15SeriesRef.current = chart.addLineSeries({ color: '#c2a1ff', lineWidth: 1.5 });
-        ema50SeriesRef.current = chart.addLineSeries({ color: '#ff6838', lineWidth: 1.5 });
-        const ema15Data = calculateHistoricalEMA(candles, 15);
-        const ema50Data = calculateHistoricalEMA(candles, 50);
-        ema15SeriesRef.current.setData(ema15Data);
-        ema50SeriesRef.current.setData(ema50Data);
-        extraSeriesRefs.current.push(ema15SeriesRef.current, ema50SeriesRef.current);
+      ema15SeriesRef.current = chart.addLineSeries({ color: '#c2a1ff', lineWidth: 1.5 });
+      ema50SeriesRef.current = chart.addLineSeries({ color: '#ff6838', lineWidth: 1.5 });
+      const ema15Data = calculateHistoricalEMA(candles, 15);
+      const ema50Data = calculateHistoricalEMA(candles, 50);
+      ema15SeriesRef.current.setData(ema15Data);
+      ema50SeriesRef.current.setData(ema50Data);
+      extraSeriesRefs.current.push(ema15SeriesRef.current, ema50SeriesRef.current);
     }
 
     const up = '#0ecb81';
@@ -627,7 +634,7 @@ export default function AlphaStream() {
     const faintColor = theme === 'light' ? 'rgba(112,122,138,0.5)' : 'rgba(132,142,156,0.5)';
 
     let mainSeries;
-    
+
     switch (chartType) {
       case "Bars":
         mainSeries = chart.addBarSeries({ upColor: up, downColor: down });
@@ -689,13 +696,13 @@ export default function AlphaStream() {
     // 1. Initialize WebWorker
     workerRef.current = new MathWorker();
     workerRef.current.onmessage = (e) => {
-        const { ema, volatility } = e.data;
-        const latestEMA = ema && ema.length > 0 ? ema[ema.length - 1] : null;
-        setWorkerMetrics({
-            volatility: volatility || 0,
-            ema10: latestEMA,
-            emaArray: ema || []
-        });
+      const { ema, volatility } = e.data;
+      const latestEMA = ema && ema.length > 0 ? ema[ema.length - 1] : null;
+      setWorkerMetrics({
+        volatility: volatility || 0,
+        ema10: latestEMA,
+        emaArray: ema || []
+      });
     };
 
 
@@ -762,7 +769,7 @@ export default function AlphaStream() {
           newPrice
         );
         setOrderBook(aggregated);
-        
+
         // Push price to local buffer for WebWorker offloading
         setLivePriceBuffer(prev => {
           const updated = [...prev, newPrice];
@@ -774,21 +781,21 @@ export default function AlphaStream() {
         });
 
         setTrades(old => {
-            const newTrade = {
-                id: Math.random().toString(),
-                price: newPrice,
-                amount: +(Math.random() * 0.2).toFixed(5),
-                side: Math.random() > 0.5 ? "buy" : "sell",
-                time: new Date().toTimeString().slice(0, 8),
-            };
-            return [newTrade, ...old].slice(0, 50);
+          const newTrade = {
+            id: Math.random().toString(),
+            price: newPrice,
+            amount: +(Math.random() * 0.2).toFixed(5),
+            side: Math.random() > 0.5 ? "buy" : "sell",
+            time: new Date().toTimeString().slice(0, 8),
+          };
+          return [newTrade, ...old].slice(0, 50);
         });
 
         if (mainSeriesRef.current && volumeSeriesRef.current && chartDataRef.current.candles.length > 0) {
           const { candles, volumes } = chartDataRef.current;
           let lastCandle = candles[candles.length - 1];
           let lastVol = volumes[volumes.length - 1];
-          
+
           const currentTf = timeframeRef.current;
           const tfSec = Math.floor(currentTf.ms / 1000);
           const currentBarTime = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
@@ -814,14 +821,14 @@ export default function AlphaStream() {
             lastCandle.close = newPrice;
             if (newPrice > lastCandle.high) lastCandle.high = newPrice;
             if (newPrice < lastCandle.low) lastCandle.low = newPrice;
-            
+
             lastVol.color = lastCandle.close >= lastCandle.open ? "rgba(14,203,129,0.5)" : "rgba(246,70,93,0.5)";
             lastVol.value += +(Math.random() * 2).toFixed(2);
           }
 
           const updateObj = { time: lastCandle.time, open: lastCandle.open, high: lastCandle.high, low: lastCandle.low, close: lastCandle.close };
           const lineObj = { time: lastCandle.time, value: lastCandle.close };
-          
+
           const currentChartType = chartTypeRef.current;
           if (currentChartType === "Bars" || currentChartType.toLowerCase().includes("candles")) {
             mainSeriesRef.current.update(updateObj);
@@ -859,14 +866,14 @@ export default function AlphaStream() {
       const activePair = selectedPairRef.current;
       if (payload.symbol.toLowerCase() === activePair.name.replace("/", "").toLowerCase()) {
         setMetrics(payload);
-        
+
         const currentTf = timeframeRef.current;
         const tfSec = Math.floor(currentTf.ms / 1000);
         const currentBarTime = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
-        
+
         if (showEMARef.current) {
-            if (ema15SeriesRef.current && payload.ema15) ema15SeriesRef.current.update({ time: currentBarTime, value: payload.ema15 });
-            if (ema50SeriesRef.current && payload.ema50) ema50SeriesRef.current.update({ time: currentBarTime, value: payload.ema50 });
+          if (ema15SeriesRef.current && payload.ema15) ema15SeriesRef.current.update({ time: currentBarTime, value: payload.ema15 });
+          if (ema50SeriesRef.current && payload.ema50) ema50SeriesRef.current.update({ time: currentBarTime, value: payload.ema50 });
         }
       }
     });
@@ -880,9 +887,9 @@ export default function AlphaStream() {
     };
   }, []);
 
-  const filteredPairs = useMemo(() => 
+  const filteredPairs = useMemo(() =>
     pairsList.filter((p) => p.name.toLowerCase().includes(pairSearch.toLowerCase())),
-  [pairsList, pairSearch]);
+    [pairsList, pairSearch]);
 
   const handleBuy = useCallback(async () => {
     setBuyError(""); setBuyFlash("");
@@ -896,23 +903,23 @@ export default function AlphaStream() {
       setBuyError("Insufficient USDT"); return;
     }
     try {
-        const res = await axios.post("http://localhost:5000/api/trade", {
-            symbol: selectedPair.name.replace("/", ""),
-            side: "BUY",
-            amountUSD: cost
-        });
-        if (res.data.status === 'SUCCESS' && res.data.newBalances) {
-            setWallet(parseFloat(res.data.newBalances.usd_balance));
-            setBtcBal(parseFloat(res.data.newBalances.btc_balance));
-        } else {
-            // Simulated trade update fallback
-            setWallet(w => +(w - cost).toFixed(2));
-            setBtcBal(b => +(b + a).toFixed(5));
-        }
-        setBuyFlash(`✓ Filled at ${p}`);
-        setTimeout(() => setBuyFlash(""), 2000);
+      const res = await axios.post("http://localhost:5000/api/trade", {
+        symbol: selectedPair.name.replace("/", ""),
+        side: "BUY",
+        amountUSD: cost
+      });
+      if (res.data.status === 'SUCCESS' && res.data.newBalances) {
+        setWallet(parseFloat(res.data.newBalances.usd_balance));
+        setBtcBal(parseFloat(res.data.newBalances.btc_balance));
+      } else {
+        // Simulated trade update fallback
+        setWallet(w => +(w - cost).toFixed(2));
+        setBtcBal(b => +(b + a).toFixed(5));
+      }
+      setBuyFlash(`✓ Filled at ${p}`);
+      setTimeout(() => setBuyFlash(""), 2000);
     } catch (err) {
-        setBuyError(err.response?.data?.error || "Trade failed");
+      setBuyError(err.response?.data?.error || "Trade failed");
     }
   }, [buyAmt, buyPrice, wallet, selectedPair.name]);
 
@@ -928,23 +935,23 @@ export default function AlphaStream() {
     }
     const cost = p * a;
     try {
-        const res = await axios.post("http://localhost:5000/api/trade", {
-            symbol: selectedPair.name.replace("/", ""),
-            side: "SELL",
-            amountUSD: cost
-        });
-        if (res.data.status === 'SUCCESS' && res.data.newBalances) {
-            setWallet(parseFloat(res.data.newBalances.usd_balance));
-            setBtcBal(parseFloat(res.data.newBalances.btc_balance));
-        } else {
-            // Simulated trade update fallback
-            setBtcBal(b => +(b - a).toFixed(5));
-            setWallet(w => +(w + cost).toFixed(2));
-        }
-        setSellFlash(`✓ Sold at ${p}`);
-        setTimeout(() => setSellFlash(""), 2000);
+      const res = await axios.post("http://localhost:5000/api/trade", {
+        symbol: selectedPair.name.replace("/", ""),
+        side: "SELL",
+        amountUSD: cost
+      });
+      if (res.data.status === 'SUCCESS' && res.data.newBalances) {
+        setWallet(parseFloat(res.data.newBalances.usd_balance));
+        setBtcBal(parseFloat(res.data.newBalances.btc_balance));
+      } else {
+        // Simulated trade update fallback
+        setBtcBal(b => +(b - a).toFixed(5));
+        setWallet(w => +(w + cost).toFixed(2));
+      }
+      setSellFlash(`✓ Sold at ${p}`);
+      setTimeout(() => setSellFlash(""), 2000);
     } catch (err) {
-        setSellError(err.response?.data?.error || "Trade failed");
+      setSellError(err.response?.data?.error || "Trade failed");
     }
   }, [buyAmt, buyPrice, btcBal, selectedPair.name]);
 
@@ -954,20 +961,20 @@ export default function AlphaStream() {
     document.body.style.userSelect = "none";
     const startX = e.clientX;
     const startWidth = leftWidth;
-    
+
     const doDrag = (moveEvent) => {
       const deltaX = moveEvent.clientX - startX;
       const newWidth = Math.max(150, Math.min(500, startWidth + deltaX));
       setLeftWidth(newWidth);
     };
-    
+
     const stopDrag = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       window.removeEventListener("mousemove", doDrag);
       window.removeEventListener("mouseup", stopDrag);
     };
-    
+
     window.addEventListener("mousemove", doDrag);
     window.addEventListener("mouseup", stopDrag);
   }, [leftWidth]);
@@ -978,20 +985,20 @@ export default function AlphaStream() {
     document.body.style.userSelect = "none";
     const startX = e.clientX;
     const startWidth = rightWidth;
-    
+
     const doDrag = (moveEvent) => {
       const deltaX = startX - moveEvent.clientX;
       const newWidth = Math.max(200, Math.min(600, startWidth + deltaX));
       setRightWidth(newWidth);
     };
-    
+
     const stopDrag = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       window.removeEventListener("mousemove", doDrag);
       window.removeEventListener("mouseup", stopDrag);
     };
-    
+
     window.addEventListener("mousemove", doDrag);
     window.addEventListener("mouseup", stopDrag);
   }, [rightWidth]);
@@ -1002,20 +1009,20 @@ export default function AlphaStream() {
     document.body.style.userSelect = "none";
     const startY = e.clientY;
     const startHeight = formHeight;
-    
+
     const doDrag = (moveEvent) => {
       const deltaY = startY - moveEvent.clientY;
       const newHeight = Math.max(180, Math.min(600, startHeight + deltaY));
       setFormHeight(newHeight);
     };
-    
+
     const stopDrag = () => {
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       window.removeEventListener("mousemove", doDrag);
       window.removeEventListener("mouseup", stopDrag);
     };
-    
+
     window.addEventListener("mousemove", doDrag);
     window.addEventListener("mouseup", stopDrag);
   }, [formHeight]);
@@ -1039,8 +1046,8 @@ export default function AlphaStream() {
   const askOpacity = theme === 'light' ? '0.08' : '0.12';
   const bidOpacity = theme === 'light' ? '0.08' : '0.12';
 
-  const sunIcon = <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2m8-10h-2M4 12H2m15.536-7.536l-1.414 1.414M6.879 17.121l-1.414 1.414m12.071 0l-1.414-1.414M6.879 6.879L5.465 5.465"/></svg>;
-  const moonIcon = <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>;
+  const sunIcon = <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2m8-10h-2M4 12H2m15.536-7.536l-1.414 1.414M6.879 17.121l-1.414 1.414m12.071 0l-1.414-1.414M6.879 6.879L5.465 5.465" /></svg>;
+  const moonIcon = <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>;
 
   return (
     <>
@@ -1124,10 +1131,10 @@ export default function AlphaStream() {
       `}</style>
 
       <div style={{ display: "flex", flexDirection: "column", width: "100vw", height: "100vh", overflow: "hidden", background: "var(--bg-primary)", color: "var(--text-primary)", boxSizing: "border-box" }}>
-        
+
         {isStale && (
           <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", background: "rgba(246,70,93,0.9)", color: "#fff", padding: "16px 24px", borderRadius: "8px", zIndex: 1000, fontWeight: 700, fontSize: "16px", boxShadow: "0 4px 12px rgba(0,0,0,0.5)", display: "flex", alignItems: "center", gap: "10px" }}>
-            <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01"/></svg>
+            <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" strokeWidth="2" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01" /></svg>
             STALE DATA WARNING
           </div>
         )}
@@ -1135,13 +1142,13 @@ export default function AlphaStream() {
         {socketStatus === "outage" && (
           <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", background: "rgba(239,68,68,0.95)", color: "#fff", padding: "24px 32px", borderRadius: "12px", zIndex: 1001, fontWeight: 700, fontSize: "18px", boxShadow: "0 8px 24px rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", border: "2px solid #ef4444" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-              <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" strokeWidth="2.5" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01"/></svg>
+              <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" strokeWidth="2.5" fill="none"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4m0 4h.01" /></svg>
               <span>CRITICAL SYSTEM OUTAGE</span>
             </div>
             <span style={{ fontSize: "14px", fontWeight: 500, opacity: 0.9 }}>Binance exchange streams are currently offline. Circuit breaker activated.</span>
           </div>
         )}
-        
+
         {/* ROW 1: Ticker Bar */}
         <div style={{ height: "48px", flexShrink: 0, display: "flex", alignItems: "center", gap: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-primary)", overflowX: "auto", overflowY: "hidden" }}>
           {INITIAL_PAIRS.map((p) => {
@@ -1164,7 +1171,7 @@ export default function AlphaStream() {
 
         {/* ROW 2: Main Body */}
         <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
-          
+
           {/* COL A: Order Book */}
           <div style={{ width: `${leftWidth}px`, flexShrink: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
             <div style={{ padding: "8px 10px", fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>Order Book</div>
@@ -1173,7 +1180,7 @@ export default function AlphaStream() {
               <span style={{ width: "70px", textAlign: "right" }}>Amount</span>
               <span style={{ flex: 1, textAlign: "right" }}>Total</span>
             </div>
-            
+
             <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column-reverse" }}>
               {orderBook.asks.map((r, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", height: "22px", padding: "0 10px", position: "relative" }}>
@@ -1208,7 +1215,7 @@ export default function AlphaStream() {
 
           {/* COL B: Center */}
           <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
-            
+
             {/* ROW B1: Pair header */}
             {(() => {
               const data = storeData[selectedPair.name] || { lastPrice: selectedPair.price, changePercent: selectedPair.change };
@@ -1239,7 +1246,7 @@ export default function AlphaStream() {
                   )
                 })}
               </div>
-              
+
               <div style={{ width: "1px", height: "16px", background: "var(--border)", margin: "0 8px" }} />
 
               <div ref={typePickerRef} style={{ position: "relative" }}>
@@ -1316,7 +1323,7 @@ export default function AlphaStream() {
 
               {/* Form Grid */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", flex: 1, paddingTop: "8px" }}>
-                
+
                 {/* Buy Column */}
                 <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                   <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }}>Avail: {wallet.toFixed(2)} USDT</div>
@@ -1376,7 +1383,7 @@ export default function AlphaStream() {
 
           {/* COL C: Right Panel */}
           <div style={{ width: `${rightWidth}px`, flexShrink: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            
+
             {/* Markets */}
             <div style={{ flexShrink: 0 }}>
               <div style={{ fontSize: "14px", fontWeight: 700, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>Markets</div>
